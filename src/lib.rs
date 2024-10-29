@@ -19,7 +19,7 @@
 //! use jqesque::Jqesque;
 //! use serde_json::json;
 //!
-//! let input = "foo.bar[0].baz=hello";
+//! let input = ">foo.bar[0].baz=hello";
 //! let jqesque = input.parse::<Jqesque>().unwrap();
 //! // Without using turbofish syntax:
 //! // let jqesque: Jqesque = input.parse().unwrap();
@@ -44,7 +44,7 @@
 //! use jqesque::{Jqesque, Separator};
 //! use serde_json::json;
 //!
-//! let input = "foo/bar[0]/baz=true";
+//! let input = ">foo/bar[0]/baz=true";
 //! let jqesque = Jqesque::from_str_with_separator(input, Separator::Slash).unwrap();
 //! let json_output = jqesque.as_json();
 //!
@@ -75,10 +75,10 @@
 //!     }
 //! });
 //!
-//! let input = "settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
+//! let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
 //! let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
 //!
-//! jqesque.insert_into(&mut json_obj);
+//! jqesque.apply_to(&mut json_obj);
 //!
 //! let expected = json!({
 //!     "settings": {
@@ -95,6 +95,13 @@
 //!
 //! ### Merging into an existing JSON structure
 //!
+//! Prefix the query with `~` (The `merge` operator) to merge JSON objects.
+//!
+//! ### Do the right thing, hopefully...
+//!
+//! If no operator is specified, the library will first try to perform a `Replace` operation. If this fails,
+//! it will attempt an `Add` operation. If this still fails, it will attempt an `Insert` operation.
+//!
 //! ```rust
 //! use serde_json::json;
 //! use jqesque::{Jqesque, Separator};
@@ -109,10 +116,10 @@
 //!     }
 //! });
 //!
-//! let input = "settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
+//! let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
 //! let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
 //!
-//! jqesque.merge_into(&mut json_obj);
+//! jqesque.apply_to(&mut json_obj);
 //!
 //! let expected = json!({
 //!     "settings": {
@@ -136,5 +143,4 @@ mod manipulators;
 mod parse;
 mod types;
 
-pub use manipulators::{insert_value, merge_json};
-pub use types::{Jqesque, ParseError, PathToken, Separator};
+pub use types::{Jqesque, JqesqueError, Operation, PathToken, Separator};
