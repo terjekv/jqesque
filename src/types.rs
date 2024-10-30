@@ -173,21 +173,33 @@ impl Jqesque {
         }
     }
 
-    pub fn apply_to(&self, json: &mut Value) -> Result<(), JqesqueError> {
+    /// Applies the parsed structure to a JSON object.
+    ///
+    /// This function applies the parsed structure to the provided JSON object, performing the operation specified
+    /// during parsing. The operation is performed in-place, modifying the provided JSON object.
+    ///
+    /// ## Arguments
+    ///
+    /// * `json` - The JSON object to apply the operation to
+    ///
+    /// ## Returns
+    ///
+    /// Returns the operation that was performed or a JqesqueError if an error occurred.
+    pub fn apply_to(&self, json: &mut Value) -> Result<Operation, JqesqueError> {
         match self.operation {
             Operation::Auto => {
                 // Try Replace
                 let mut jq_replace = self.clone();
                 jq_replace.operation = Operation::Replace;
                 if jq_replace.apply_to(json).is_ok() {
-                    return Ok(());
+                    return Ok(Operation::Replace);
                 }
 
                 // Try Add
                 let mut jq_add = self.clone();
                 jq_add.operation = Operation::Add;
                 if jq_add.apply_to(json).is_ok() {
-                    return Ok(());
+                    return Ok(Operation::Add);
                 }
 
                 // Fallback to Insert
@@ -213,7 +225,8 @@ impl Jqesque {
 
                     let patch = Patch(vec![patch_op]);
                     json_patch::patch(json, &patch)
-                        .map_err(|e| JqesqueError::PatchError(e.to_string()))
+                        .map_err(|e| JqesqueError::PatchError(e.to_string()))?;
+                    Ok(self.operation.clone())
                 } else {
                     Err(JqesqueError::MissingValueError(self.operation.clone()))
                 }
@@ -223,7 +236,9 @@ impl Jqesque {
 
                 let patch_op = PatchOperation::Remove(RemoveOperation { path: pointer_buf });
                 let patch = Patch(vec![patch_op]);
-                json_patch::patch(json, &patch).map_err(|e| JqesqueError::PatchError(e.to_string()))
+                json_patch::patch(json, &patch)
+                    .map_err(|e| JqesqueError::PatchError(e.to_string()))?;
+                Ok(Operation::Remove)
             }
             Operation::Test => {
                 if let Some(ref expected_value) = self.value {
@@ -233,7 +248,7 @@ impl Jqesque {
                     match pointer.resolve(json) {
                         Ok(actual_value) => {
                             if actual_value == expected_value {
-                                Ok(())
+                                Ok(Operation::Test)
                             } else {
                                 Err(JqesqueError::TestFailedError {
                                     expected: expected_value.clone(),
@@ -252,16 +267,23 @@ impl Jqesque {
                 let mut temp_value = Value::Null;
                 insert_value(&mut temp_value, &self.tokens, &self.value);
                 merge_json(json, &mut temp_value);
-                Ok(())
+                Ok(Operation::Merge)
             }
             Operation::Insert => {
                 // Assuming no errors occur during insert
                 insert_value(json, &self.tokens, &self.value);
-                Ok(())
+                Ok(Operation::Insert)
             }
         }
     }
 
+    /// Converts the path tokens to a JSON Pointer.
+    ///
+    /// This function converts the path tokens to a JSON Pointer, which is a string representation of the path.
+    ///
+    /// ## Returns
+    ///
+    /// Returns a `PointerBuf` object representing the path tokens.
     fn tokens_to_pointer(&self) -> PointerBuf {
         let tokens = self.tokens.iter().map(|token| match token {
             PathToken::Key(ref key) => Token::new(escape_json_pointer_segment(key)),
@@ -272,7 +294,19 @@ impl Jqesque {
     }
 }
 
-// Helper function to escape JSON Pointer segments
+/// Helper function to escape JSON Pointer segments.
+///
+/// This is necessary to escape the characters '~' and '/' in JSON Pointer segments, as per
+/// the JSON Pointer specification evalution:
+/// https://datatracker.ietf.org/doc/html/rfc6901#section-4
+///
+/// ## Arguments
+///
+/// * `segment` - The segment to escape
+///
+/// ## Returns
+///
+/// Returns the escaped segment as a `String`.
 fn escape_json_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
