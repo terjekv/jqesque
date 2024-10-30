@@ -363,7 +363,8 @@ fn test_remove_operation_failure(input: &str, separator: Separator) {
         json!({
             "existing_key": "new_value",
             "array": [1, 2, 3]
-        })
+        }),
+        Operation::Replace
     },
     add_new_key = {
         "new_key=new_value", Separator::Dot,
@@ -371,7 +372,8 @@ fn test_remove_operation_failure(input: &str, separator: Separator) {
             "existing_key": "old_value",
             "array": [1, 2, 3],
             "new_key": "new_value"
-        })
+        }),
+        Operation::Add
     },
     insert_new_nested_key = {
         "parent.new_child=new_value", Separator::Dot,
@@ -381,21 +383,25 @@ fn test_remove_operation_failure(input: &str, separator: Separator) {
             "parent": {
                 "new_child": "new_value"
             }
-        })
+        }),
+        Operation::Insert
     },
     replace_array_element = {
         "array[1]=42", Separator::Dot,
         json!({
             "existing_key": "old_value",
             "array": [1, 42, 3]
-        })
+        }),
+        Operation::Replace
+
     },
     add_to_array_end = {
         "array[3]=4", Separator::Dot,
         json!({
             "existing_key": "old_value",
             "array": [1, 2, 3, 4]
-        })
+        }),
+        Operation::Add
     },
     insert_new_array = {
         "new_array[0]=1", Separator::Dot,
@@ -403,10 +409,16 @@ fn test_remove_operation_failure(input: &str, separator: Separator) {
             "existing_key": "old_value",
             "array": [1, 2, 3],
             "new_array": [1]
-        })
+        }),
+        Operation::Insert
     },
 )]
-fn test_auto_operation(input: &str, separator: Separator, expected: serde_json::Value) {
+fn test_auto_operation(
+    input: &str,
+    separator: Separator,
+    expected: serde_json::Value,
+    epxected_operation: Operation,
+) {
     let parsed = Jqesque::from_str_with_separator(input, separator).expect("Failed to parse input");
     assert_eq!(parsed.operation, Operation::Auto);
 
@@ -415,21 +427,8 @@ fn test_auto_operation(input: &str, separator: Separator, expected: serde_json::
         "array": [1, 2, 3]
     });
 
-    parsed.apply_to(&mut json_obj).unwrap();
-
-    assert_eq!(json_obj, expected);
-}
-
-/// Tests for as_json method.
-#[parameterized(
-    simple_key = { ">key=value", json!({"key": "value"}) } ,
-    nested_keys = { ">parent.child=value", json!({"parent": {"child": "value"}}) },
-)]
-fn test_as_json(input: &str, expected: serde_json::Value) {
-    let json_obj = input
-        .parse::<Jqesque>()
-        .expect("Failed to parse input")
-        .as_json();
+    let operation = parsed.apply_to(&mut json_obj).unwrap();
+    assert_eq!(operation, epxected_operation);
 
     assert_eq!(json_obj, expected);
 }
@@ -515,4 +514,18 @@ fn test_invalid_path_errors(input: &str, separator: Separator) {
         Err(e) => panic!("Expected NomError, got {:?}", e),
         _ => panic!("Expected error but parsing succeeded"),
     }
+}
+
+/// Tests for as_json method.
+#[parameterized(
+    simple_key = { ">key=value", json!({"key": "value"}) } ,
+    nested_keys = { ">parent.child=value", json!({"parent": {"child": "value"}}) },
+)]
+fn test_as_json(input: &str, expected: serde_json::Value) {
+    let json_obj = input
+        .parse::<Jqesque>()
+        .expect("Failed to parse input")
+        .as_json();
+
+    assert_eq!(json_obj, expected);
 }
