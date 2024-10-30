@@ -118,7 +118,7 @@ let mut json_obj = json!({
 let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
 let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
 
-jqesque.insert_into(&mut json_obj);
+jqesque.apply_to(&mut json_obj);
 
 let expected = json!({
     "settings": {
@@ -149,10 +149,10 @@ let mut json_obj = json!({
     }
 });
 
-let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
+let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
 let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
 
-jqesque.merge_into(&mut json_obj);
+jqesque.apply_to(&mut json_obj);
 
 let expected = json!({
     "settings": {
