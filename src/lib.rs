@@ -11,6 +11,39 @@
 //! - **Boolean, Number, and Null Values:** Automatically parses values as booleans, numbers, or null if possible. By default, the value is a string unless serde can parse it as a boolean, number, or null.
 //! - **Custom Separators:** Scopes can be separated by `Separator::Dot` (`.`), `Separator::Slash` (`/`), or `Separator::Custom(char)` (custom character).
 //!
+//! ## Syntax
+//!
+//! The syntax is inspired by [jq](https://jqlang.github.io/jq/) and [JSONPath](https://goessner.net/articles/JsonPath/) and is as follows:
+//!
+//! ```text
+//! [<operation>]<path>=[<value>]
+//! ```
+//!
+//! - `<operation>`: An optional operation to perform. Supported operations are Add (+), Replace (=), Remove (-), Test (?), Insert (>), and Merge (~).
+//! - `<path>`: The path to the JSON key. The path can be nested and can include array indices. The path can be separated by a dot (`.`), a slash (`/`), or a custom character.
+//! - `<value>`: A JSON value. Note that the Remove operation does not require a value.
+//!
+//! ### Operations
+//!
+//! Add, Remove, Replace, and Test operations are done as per the JSON Patch specification in [RFC6902](https://datatracker.ietf.org/doc/html/rfc6902/).
+//!
+//! - **Add (+):** Adds a new key-value pair to the JSON structure. If the key already exists, the operation fails. If the key is an array index, the operation appends the value to the array.
+//! - **Remove (-):** Removes the key from the JSON structure.
+//! - **Replace (=):** Replaces the value of an existing key. If the key does not exist, the operation fails.
+//! - **Test (?):** Tests if the key-value pair exists in the JSON structure.
+//! - **Insert (>):** Inserts a new key-value pair into the JSON structure. If the key already exists, the operation overwrites the value.
+//! - **Merge (~):** Preforms a deep merge of the value into the existing JSON structure. null values are preserved in the existing structure. Note that this behavior **differs** from from JSON Merge Patch defined in [RFC7396](https://datatracker.ietf.org/doc/html/rfc7396).
+//!
+//! For more information, see the Operation enum itself.
+//!
+//! ### Paths
+//!
+//! Paths can be nested and can include array indices. The path can be separated by a dot (`.`), a slash (`/`), or a custom character.
+//!
+//! ### Values
+//!
+//! Values are parsed as by serde_json. The library will attempt to parse the value as a JSON value, defaulting to string.
+//!
 //! ## Examples
 //!
 //! ### Basic usage:
