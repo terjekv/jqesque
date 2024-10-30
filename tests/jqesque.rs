@@ -455,6 +455,21 @@ fn test_patch_errors(input: &str, separator: Separator) {
     }
 }
 
+/// Tests for the `Test` operation that should **succeed**.
+#[parameterized(
+    test_existing_key = { "?key=value", Separator::Dot, json!({ "key": "value" }) },
+    test_nested_key = { "?parent.child=value", Separator::Dot, json!({ "parent": { "child": "value" } }) },
+    test_array_element = { "?array[0]=1", Separator::Dot, json!({ "array": [1, 2, 3] }) },
+    test_nested_array_element = { "?array[0][1]=2", Separator::Dot, json!({ "array": [[null, 2]] }) },
+)]
+fn test_test_operation_success(input: &str, separator: Separator, initial_json: serde_json::Value) {
+    let parsed = Jqesque::from_str_with_separator(input, separator).expect("Failed to parse input");
+    assert_eq!(parsed.operation, Operation::Test);
+
+    let mut json_obj = initial_json;
+    assert!(parsed.apply_to(&mut json_obj).is_ok());
+}
+
 /// Tests for test failed errors.
 #[parameterized(
         test_value_mismatch = { "?key=expected_value", Separator::Dot, json!({ "key": "actual_value" }) },
