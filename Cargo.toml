@@ -1,6 +1,6 @@
 [package]
 name = "jqesque"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Terje Kvernes <terje@kvernes.no>"]
 description = "Simple string assignment expressions with JQ-esque syntax for JSON interaction"
