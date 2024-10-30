@@ -459,6 +459,54 @@ impl Display for Operation {
     }
 }
 
+impl Operation {
+    // Define the operator characters as associated constants
+    const INSERT_OP: char = '>';
+    const MERGE_OP: char = '~';
+    const ADD_OP: char = '+';
+    const REMOVE_OP: char = '-';
+    const REPLACE_OP: char = '=';
+    const TEST_OP: char = '?';
+
+    // Get all valid operators
+    pub fn operators() -> &'static [char] {
+        &[
+            Self::INSERT_OP,
+            Self::MERGE_OP,
+            Self::ADD_OP,
+            Self::REMOVE_OP,
+            Self::REPLACE_OP,
+            Self::TEST_OP,
+        ]
+    }
+
+    // Convert from operator character to Operation
+    pub fn from_operator(op: char) -> Option<Self> {
+        match op {
+            Self::INSERT_OP => Some(Self::Insert),
+            Self::MERGE_OP => Some(Self::Merge),
+            Self::ADD_OP => Some(Self::Add),
+            Self::REMOVE_OP => Some(Self::Remove),
+            Self::REPLACE_OP => Some(Self::Replace),
+            Self::TEST_OP => Some(Self::Test),
+            _ => None,
+        }
+    }
+
+    // Get the operator character for this operation
+    pub fn to_operator(&self) -> Option<char> {
+        match self {
+            Self::Insert => Some(Self::INSERT_OP),
+            Self::Merge => Some(Self::MERGE_OP),
+            Self::Add => Some(Self::ADD_OP),
+            Self::Remove => Some(Self::REMOVE_OP),
+            Self::Replace => Some(Self::REPLACE_OP),
+            Self::Test => Some(Self::TEST_OP),
+            Self::Auto => None,
+        }
+    }
+}
+
 #[derive(Error, Debug, PartialEq)]
 pub enum JqesqueError {
     #[error("Parsing error: {0}")]

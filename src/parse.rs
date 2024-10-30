@@ -49,16 +49,9 @@ fn jqesque(input: &str, separator: char) -> Res<&str, Jqesque> {
 }
 
 fn operation_prefix(input: &str) -> Res<&str, Operation> {
-    let (input, op_char) = one_of("+-=~>?")(input)?;
-    let operation = match op_char {
-        '+' => Operation::Add,
-        '-' => Operation::Remove,
-        '=' => Operation::Replace,
-        '~' => Operation::Merge,
-        '?' => Operation::Test,
-        '>' => Operation::Insert,
-        _ => unreachable!(),
-    };
+    let (input, op_char) = one_of(Operation::operators())(input)?;
+    let operation =
+        Operation::from_operator(op_char).expect("operator should be valid since we used one_of");
     Ok((input, operation))
 }
 
