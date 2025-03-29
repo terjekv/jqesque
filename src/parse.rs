@@ -4,11 +4,11 @@ use nom::{
     bytes::complete::{escaped_transform, is_not, take_while1},
     character::complete::{char, digit1, none_of, one_of},
     combinator::{all_consuming, map, map_res, opt},
-    error::VerboseError,
     multi::{many1, separated_list1},
     sequence::delimited,
-    IResult,
+    IResult, Parser,
 };
+use nom_language::error::VerboseError;
 use serde_json::Value;
 
 type Res<T, U> = IResult<T, U, VerboseError<T>>;
@@ -25,7 +25,7 @@ type Res<T, U> = IResult<T, U, VerboseError<T>>;
 /// Returns a `Jqesque` structure if successful, or a `JqesqueError` if parsing fails.
 pub fn parse_input(input: &str, separator: Separator) -> Result<Jqesque, JqesqueError> {
     let sep_char = separator.as_char();
-    let res = all_consuming(|i| jqesque(i, sep_char))(input);
+    let res = all_consuming(|i| jqesque(i, sep_char)).parse(input);
     match res {
         Ok((_, jqesque)) => Ok(jqesque),
         Err(err) => Err(JqesqueError::NomError(format!("{}", err))),
@@ -33,7 +33,7 @@ pub fn parse_input(input: &str, separator: Separator) -> Result<Jqesque, Jqesque
 }
 
 fn jqesque(input: &str, separator: char) -> Res<&str, Jqesque> {
-    let (input, operation) = opt(operation_prefix)(input)?;
+    let (input, operation) = opt(operation_prefix).parse(input)?;
     let operation = operation.unwrap_or(Operation::Auto);
 
     let (input, (tokens, value)) = assignment(input, separator, &operation)?;
@@ -66,7 +66,7 @@ fn assignment<'a>(
         Operation::Remove => (input, None),
         _ => {
             let (input, _) = char('=')(input)?;
-            let (input, _) = opt(char(' '))(input)?;
+            let (input, _) = opt(char(' ')).parse(input)?;
             let (input, value) = json_value(input)?;
             (input, Some(value))
         }
@@ -77,7 +77,7 @@ fn assignment<'a>(
 
 fn path(input: &str, separator: char) -> Res<&str, Vec<PathToken>> {
     let (input, token_vecs) =
-        separated_list1(char(separator), alt((array_access, key_segment)))(input)?;
+        separated_list1(char(separator), alt((array_access, key_segment))).parse(input)?;
 
     let tokens = token_vecs.into_iter().flatten().collect();
 
@@ -87,17 +87,19 @@ fn path(input: &str, separator: char) -> Res<&str, Vec<PathToken>> {
 fn key_segment(input: &str) -> Res<&str, Vec<PathToken>> {
     map(alt((quoted_string, valid_identifier)), |s: String| {
         vec![PathToken::Key(s)]
-    })(input)
+    })
+    .parse(input)
 }
 
 fn array_access(input: &str) -> Res<&str, Vec<PathToken>> {
-    let (input, key_opt) = opt(alt((quoted_string, valid_identifier)))(input)?;
+    let (input, key_opt) = opt(alt((quoted_string, valid_identifier))).parse(input)?;
 
     let (input, indices) = many1(delimited(
         char('['),
         map_res(digit1, |s: &str| s.parse::<usize>()),
         char(']'),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     let mut tokens = Vec::new();
 
@@ -116,7 +118,8 @@ fn valid_identifier(input: &str) -> Res<&str, String> {
     map(
         take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-'),
         |s: &str| s.to_string(),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn quoted_string(input: &str) -> Res<&str, String> {
@@ -124,11 +127,13 @@ fn quoted_string(input: &str) -> Res<&str, String> {
         char('"'),
         escaped_transform(none_of("\\\""), '\\', one_of("\\\"nrt")),
         char('"'),
-    )(input)
+    )
+    .parse(input)
 }
 
 fn json_value(input: &str) -> Res<&str, Value> {
     map(is_not(""), |s: &str| {
         serde_json::from_str(s).unwrap_or(Value::String(s.to_string()))
-    })(input)
+    })
+    .parse(input)
 }
