@@ -253,6 +253,10 @@ cargo iai-callgrind --bench merge_deep_object_large_callgrind
 PR benchmark reporting and regression gating uses
 `terjekv/github-action-iai-callgrind` via `.github/workflows/bench.yml`.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and notable changes.
+
 ## License
 
 See the [LICENSE](LICENSE) file for details.
