@@ -18,4 +18,51 @@ nom = { version = "8", features = ["alloc"] }
 thiserror = "2"
 json-patch = "4"
 jsonptr = "0"
-yare = "3"
+
+[dev-dependencies]
+rstest = "0.24"
+iai-callgrind = "0.14"
+
+[[bench]]
+name = "parse_scalar_small_callgrind"
+harness = false
+
+[[bench]]
+name = "parse_array_medium_callgrind"
+harness = false
+
+[[bench]]
+name = "parse_deep_path_medium_callgrind"
+harness = false
+
+[[bench]]
+name = "parse_object_large_callgrind"
+harness = false
+
+[[bench]]
+name = "insert_object_small_callgrind"
+harness = false
+
+[[bench]]
+name = "insert_array_sparse_medium_callgrind"
+harness = false
+
+[[bench]]
+name = "insert_deep_path_medium_callgrind"
+harness = false
+
+[[bench]]
+name = "insert_array_dense_large_callgrind"
+harness = false
+
+[[bench]]
+name = "merge_object_small_callgrind"
+harness = false
+
+[[bench]]
+name = "merge_array_medium_callgrind"
+harness = false
+
+[[bench]]
+name = "merge_deep_object_large_callgrind"
+harness = false

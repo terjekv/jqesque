@@ -1,0 +1,29 @@
+[package]
+name = "jqesque-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.jqesque]
+path = ".."
+
+[[bin]]
+name = "parse_apply"
+path = "fuzz_targets/parse_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deep_paths_indices"
+path = "fuzz_targets/deep_paths_indices.rs"
+test = false
+doc = false
+bench = false

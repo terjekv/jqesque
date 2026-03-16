@@ -8,16 +8,69 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::manipulators::{insert_value, merge_json};
-use crate::parse::parse_input;
+use crate::parse::{parse_input, parse_input_with_options};
+
+pub const DEFAULT_MAX_PATH_DEPTH: usize = 128;
+pub const DEFAULT_MAX_ARRAY_INDEX: usize = 1_000_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ParseOptions {
+    separator: Separator,
+    strict_json_values: bool,
+    max_path_depth: usize,
+    max_array_index: usize,
+}
+
+impl ParseOptions {
+    pub fn new(separator: Separator) -> Self {
+        Self {
+            separator,
+            strict_json_values: false,
+            max_path_depth: DEFAULT_MAX_PATH_DEPTH,
+            max_array_index: DEFAULT_MAX_ARRAY_INDEX,
+        }
+    }
+
+    pub fn strict_json_values(mut self, strict_json_values: bool) -> Self {
+        self.strict_json_values = strict_json_values;
+        self
+    }
+
+    pub fn max_path_depth(mut self, max_path_depth: usize) -> Self {
+        self.max_path_depth = max_path_depth;
+        self
+    }
+
+    pub fn max_array_index(mut self, max_array_index: usize) -> Self {
+        self.max_array_index = max_array_index;
+        self
+    }
+
+    pub fn separator(&self) -> Separator {
+        self.separator
+    }
+
+    pub fn strict_json_values_enabled(&self) -> bool {
+        self.strict_json_values
+    }
+
+    pub fn max_path_depth_limit(&self) -> usize {
+        self.max_path_depth
+    }
+
+    pub fn max_array_index_limit(&self) -> usize {
+        self.max_array_index
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Jqesque {
     // The path tokens representing the path to the value (the left-hand side of the assignment)
-    pub tokens: Vec<PathToken>,
+    tokens: Vec<PathToken>,
     // The value itself (the right-hand side of the assignment)
-    pub value: Option<Value>,
+    value: Option<Value>,
     // The operation to perform
-    pub operation: Operation,
+    operation: Operation,
 }
 
 impl FromStr for Jqesque {
@@ -50,7 +103,33 @@ impl FromStr for Jqesque {
 }
 
 impl Jqesque {
+    pub(crate) fn from_parts_unchecked(
+        tokens: Vec<PathToken>,
+        value: Option<Value>,
+        operation: Operation,
+    ) -> Self {
+        Self {
+            tokens,
+            value,
+            operation,
+        }
+    }
+
+    pub fn new(
+        tokens: Vec<PathToken>,
+        value: Option<Value>,
+        operation: Operation,
+    ) -> Result<Self, JqesqueError> {
+        let jq = Self::from_parts_unchecked(tokens, value, operation);
+        jq.validate_limits(DEFAULT_MAX_PATH_DEPTH, DEFAULT_MAX_ARRAY_INDEX)?;
+        Ok(jq)
+    }
+
     /// Parses an input string into a `Jqesque` structure using the specified separator.
+    ///
+    /// This is a convenience API for trusted or simple inputs.
+    /// For untrusted input, prefer `from_str_with_options` so you can configure
+    /// strict parsing and resource limits.
     ///
     /// ## Arguments
     ///
@@ -92,6 +171,28 @@ impl Jqesque {
         parse_input(input, separator)
     }
 
+    /// Parses an input string into a `Jqesque` structure using parse options.
+    ///
+    /// This is the recommended API for untrusted input because it allows
+    /// strict JSON value parsing and configurable safety limits.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use jqesque::{Jqesque, ParseOptions, Separator};
+    ///
+    /// let options = ParseOptions::new(Separator::Dot)
+    ///     .strict_json_values(true)
+    ///     .max_path_depth(64)
+    ///     .max_array_index(10_000);
+    ///
+    /// let jqesque = Jqesque::from_str_with_options("foo.bar=\"baz\"", options).unwrap();
+    /// assert_eq!(jqesque.tokens().len(), 2);
+    /// ```
+    pub fn from_str_with_options(input: &str, options: ParseOptions) -> Result<Self, JqesqueError> {
+        parse_input_with_options(input, options)
+    }
+
     /// Returns the path tokens of the parsed structure.
     pub fn tokens(&self) -> &[PathToken] {
         &self.tokens
@@ -126,6 +227,11 @@ impl Jqesque {
     /// ```
     pub fn value(&self) -> &Option<Value> {
         &self.value
+    }
+
+    /// Returns the parsed operation.
+    pub fn operation(&self) -> &Operation {
+        &self.operation
     }
 
     /// Converts the parsed structure into a new JSON object.
@@ -167,7 +273,8 @@ impl Jqesque {
             Operation::Merge | Operation::Insert => {
                 // For merge and insert, return the value to be merged or inserted
                 let mut json_obj = Value::Null;
-                insert_value(&mut json_obj, &self.tokens, &self.value);
+                let value = self.value.as_ref().unwrap_or(&Value::Null);
+                insert_value(&mut json_obj, &self.tokens, value);
                 json_obj
             }
         }
@@ -186,6 +293,8 @@ impl Jqesque {
     ///
     /// Returns the operation that was performed or a JqesqueError if an error occurred.
     pub fn apply_to(&self, json: &mut Value) -> Result<Operation, JqesqueError> {
+        self.validate_limits(DEFAULT_MAX_PATH_DEPTH, DEFAULT_MAX_ARRAY_INDEX)?;
+
         match self.operation {
             Operation::Auto => {
                 // Try Replace
@@ -265,16 +374,53 @@ impl Jqesque {
             Operation::Merge => {
                 // Assuming no errors occur during merge
                 let mut temp_value = Value::Null;
-                insert_value(&mut temp_value, &self.tokens, &self.value);
+                let value = self.value.as_ref().unwrap_or(&Value::Null);
+                insert_value(&mut temp_value, &self.tokens, value);
                 merge_json(json, &mut temp_value);
                 Ok(Operation::Merge)
             }
             Operation::Insert => {
                 // Assuming no errors occur during insert
-                insert_value(json, &self.tokens, &self.value);
+                let value = self.value.as_ref().unwrap_or(&Value::Null);
+                insert_value(json, &self.tokens, value);
                 Ok(Operation::Insert)
             }
         }
+    }
+
+    pub fn validate_limits(
+        &self,
+        max_path_depth: usize,
+        max_array_index: usize,
+    ) -> Result<(), JqesqueError> {
+        if self.tokens.len() > max_path_depth {
+            return Err(JqesqueError::LimitExceededError {
+                kind: "path depth",
+                limit: max_path_depth,
+                found: self.tokens.len(),
+            });
+        }
+
+        let max_found_index = self
+            .tokens
+            .iter()
+            .filter_map(|token| match token {
+                PathToken::Index(index) => Some(*index),
+                _ => None,
+            })
+            .max();
+
+        if let Some(index) = max_found_index {
+            if index > max_array_index {
+                return Err(JqesqueError::LimitExceededError {
+                    kind: "array index",
+                    limit: max_array_index,
+                    found: index,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Converts the path tokens to a JSON Pointer.
@@ -557,4 +703,14 @@ pub enum JqesqueError {
 
     #[error("Failed to access path: {0}")]
     InvalidPathError(String),
+
+    #[error("Invalid JSON value in strict mode: {0}")]
+    InvalidJsonValueError(String),
+
+    #[error("Limit exceeded for {kind}: limit={limit}, found={found}")]
+    LimitExceededError {
+        kind: &'static str,
+        limit: usize,
+        found: usize,
+    },
 }

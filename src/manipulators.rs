@@ -10,9 +10,7 @@ use serde_json::{Map, Value};
 /// * `json_obj` - The JSON object to insert into.
 /// * `tokens` - The path tokens representing where to insert.
 /// * `value` - The value to insert.
-pub fn insert_value(json_obj: &mut Value, tokens: &[PathToken], value: &Option<Value>) {
-    let value = value.as_ref().unwrap_or(&Value::Null);
-
+pub fn insert_value(json_obj: &mut Value, tokens: &[PathToken], value: &Value) {
     if tokens.is_empty() {
         *json_obj = value.clone();
         return;
@@ -28,7 +26,7 @@ pub fn insert_value(json_obj: &mut Value, tokens: &[PathToken], value: &Option<V
                 .unwrap()
                 .entry(key.clone())
                 .or_insert(Value::Null);
-            insert_value(entry, &tokens[1..], &Some(value.clone()));
+            insert_value(entry, &tokens[1..], value);
         }
         PathToken::Index(index) => {
             if !json_obj.is_array() {
@@ -39,7 +37,7 @@ pub fn insert_value(json_obj: &mut Value, tokens: &[PathToken], value: &Option<V
             if *index >= array.len() {
                 array.resize(*index + 1, Value::Null);
             }
-            insert_value(&mut array[*index], &tokens[1..], &Some(value.clone()));
+            insert_value(&mut array[*index], &tokens[1..], value);
         }
     }
 }
@@ -72,11 +70,12 @@ pub fn merge_json(a: &mut Value, b: &mut Value) {
     }
 }
 
+#[cfg(test)]
 mod test {
     #[allow(unused_imports)]
     use super::{insert_value, merge_json};
+    use rstest::rstest;
     use serde_json::json;
-    use yare::parameterized;
 
     #[allow(unused_imports)]
     use crate::{Jqesque, JqesqueError, PathToken, Separator};
@@ -88,12 +87,20 @@ mod test {
         })
     }
 
-    #[parameterized(
-        new_keys = { json!({"key2": "value2"}), json!({"key": "value", "key2": "value2"}) },
-        nested_keys = { json!({"parent": {"child": "value"}}), json!({"key": "value", "parent": {"child": "value"}}) },
-        nested_array = { json!({"array": [1]}), json!({"key": "value", "array": [1]}) },
+    #[rstest]
+    #[case::new_keys(
+        json!({"key2": "value2"}),
+        json!({"key": "value", "key2": "value2"})
     )]
-    fn test_merge_json_ok(new_data: serde_json::Value, expected: serde_json::Value) {
+    #[case::nested_keys(
+        json!({"parent": {"child": "value"}}),
+        json!({"key": "value", "parent": {"child": "value"}})
+    )]
+    #[case::nested_array(json!({"array": [1]}), json!({"key": "value", "array": [1]}))]
+    fn test_merge_json_ok(
+        #[case] new_data: serde_json::Value,
+        #[case] expected: serde_json::Value,
+    ) {
         let mut json_obj = base_json();
         let mut new_data = new_data;
         merge_json(&mut json_obj, &mut new_data);
@@ -101,15 +108,18 @@ mod test {
         assert_eq!(json_obj, expected);
     }
 
-    #[parameterized(
-        empty_path = { vec![], json!("value"), json!("value") },
-        single_key = { vec!["key"], json!("value"), json!({"key": "value"}) },
-        nested_keys = { vec!["key2", "key3"], json!("value"), json!({"key2": {"key3": "value"}}) },
+    #[rstest]
+    #[case::empty_path(vec![], json!("value"), json!("value"))]
+    #[case::single_key(vec!["key"], json!("value"), json!({"key": "value"}))]
+    #[case::nested_keys(
+        vec!["key2", "key3"],
+        json!("value"),
+        json!({"key2": {"key3": "value"}})
     )]
     fn test_insert_value_ok(
-        tokens: Vec<&str>,
-        value: serde_json::Value,
-        expected: serde_json::Value,
+        #[case] tokens: Vec<&str>,
+        #[case] value: serde_json::Value,
+        #[case] expected: serde_json::Value,
     ) {
         let mut json_obj = serde_json::Value::Null;
         let tokens: Vec<_> = tokens
@@ -117,27 +127,58 @@ mod test {
             .map(|s| s.to_string())
             .map(PathToken::Key)
             .collect();
-        insert_value(&mut json_obj, &tokens, &Some(value));
+        insert_value(&mut json_obj, &tokens, &value);
 
         assert_eq!(json_obj, expected);
     }
 
-    #[parameterized(
-    negative_index = { "arr[-1]=value", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[-1]=value\", Char('='))] }".to_string()) },
-    invalid_index = { "arr[invalid]=value", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[invalid]=value\", Char('='))] }".to_string())}, 
-    missing_value = { "key=", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Nom(IsNot))] }".to_string()) },
-    missing_key = { "=value", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string()) },
-    missing_assignment = { "key", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string()) },
-    illegal_operator = { "!key=value", Separator::Dot, JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"!key=value\", Nom(TakeWhile1)), (\"!key=value\", Nom(Alt)), (\"!key=value\", Nom(Alt))] }".to_string()) },
-)]
-    fn test_parse_input_err(input: &str, separator: Separator, expected: JqesqueError) {
+    #[rstest]
+    #[case::negative_index(
+        "arr[-1]=value",
+        Separator::Dot,
+        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[-1]=value\", Char('='))] }".to_string())
+    )]
+    #[case::invalid_index(
+        "arr[invalid]=value",
+        Separator::Dot,
+        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[invalid]=value\", Char('='))] }".to_string())
+    )]
+    #[case::missing_value(
+        "key=",
+        Separator::Dot,
+        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Nom(IsNot))] }".to_string())
+    )]
+    #[case::missing_key(
+        "=value",
+        Separator::Dot,
+        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string())
+    )]
+    #[case::missing_assignment(
+        "key",
+        Separator::Dot,
+        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string())
+    )]
+    #[case::illegal_operator(
+        "!key=value",
+        Separator::Dot,
+        JqesqueError::NomError(
+            "Parsing Error: VerboseError { errors: [(\"!key=value\", Nom(TakeWhile1)), (\"!key=value\", Nom(Alt)), (\"!key=value\", Nom(Alt))] }"
+                .to_string()
+        )
+    )]
+    fn test_parse_input_err(
+        #[case] input: &str,
+        #[case] separator: Separator,
+        #[case] expected: JqesqueError,
+    ) {
         let result = Jqesque::from_str_with_separator(input, separator);
 
         match result {
             Ok(_) => {
                 let parsed = result.unwrap();
                 let mut json_obj = serde_json::Value::Null;
-                insert_value(&mut json_obj, parsed.tokens(), parsed.value());
+                let value = parsed.value().clone().unwrap_or(serde_json::Value::Null);
+                insert_value(&mut json_obj, parsed.tokens(), &value);
                 panic!(
                     "Expected an error, but got Ok (tokens: {:?} -> json_obj: {})",
                     parsed.tokens(),

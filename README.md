@@ -46,6 +46,40 @@ Paths can be nested and can include array indices. The path can be separated by 
 
 Values are parsed by serde_json. The library will attempt to parse the value as a JSON value, defaulting to string.
 
+## Safety and ParseOptions
+
+When parsing untrusted input (e.g. from HTTP requests, CLI arguments, or config files), use
+`ParseOptions` to bound resource usage and enforce strict value parsing.
+
+- `strict_json_values(true)`: require the right-hand side to be valid JSON.
+- `max_path_depth(n)`: reject deeply nested paths.
+- `max_array_index(n)`: reject oversized array indices.
+
+The default limits are exported as `DEFAULT_MAX_PATH_DEPTH` and `DEFAULT_MAX_ARRAY_INDEX`.
+
+### API selection guide
+
+| API | Best for | Notes |
+| --- | --- | --- |
+| `input.parse::<Jqesque>()` | Quick defaults with dot separator | Uses permissive value parsing and default limits. |
+| `Jqesque::from_str_with_separator(input, separator)` | Convenience with custom separator | Prefer for trusted/simple input. |
+| `Jqesque::from_str_with_options(input, options)` | Untrusted input and production boundaries | Recommended: supports strict parsing and custom limits. |
+
+### Recommended setup for untrusted input
+
+```rust
+use jqesque::{Jqesque, ParseOptions, Separator};
+
+let options = ParseOptions::new(Separator::Dot)
+    .strict_json_values(true)
+    .max_path_depth(64)
+    .max_array_index(10_000);
+
+let jqesque = Jqesque::from_str_with_options("settings.theme=\"dark\"", options)?;
+```
+
+If you prefer permissive parsing (legacy behavior), keep `strict_json_values(false)`.
+
 ## Examples
 
 ### Basic Usage
@@ -60,8 +94,12 @@ fn main() {
     // Without using turbofish syntax:
     // let jqesque: Jqesque = input.parse().unwrap();
 
-    // Alternatively, if you want to specify the separator:
-    // let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+    // Recommended for untrusted input:
+    // let options = ParseOptions::new(Separator::Dot)
+    //     .strict_json_values(true)
+    //     .max_path_depth(64)
+    //     .max_array_index(10_000);
+    // let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 
     let json_output = jqesque.as_json();
     assert_eq!(json_output, json!({
@@ -79,12 +117,16 @@ fn main() {
 ### Specifying the separator
 
 ```rust
-use jqesque::{Jqesque, Separator};
+use jqesque::{Jqesque, ParseOptions, Separator};
 use serde_json::json;
 
 fn main() {
     let input = ">foo/bar[0]/baz=true";
-    let jqesque = Jqesque::from_str_with_separator(input, Separator::Slash).unwrap();
+    let options = ParseOptions::new(Separator::Slash)
+        .strict_json_values(true)
+        .max_path_depth(64)
+        .max_array_index(10_000);
+    let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 
     let json_output = jqesque.as_json();
     assert_eq!(json_output, json!({
@@ -103,7 +145,7 @@ fn main() {
 
 ```rust
 use serde_json::json;
-use jqesque::{Jqesque, Separator};
+use jqesque::{Jqesque, ParseOptions, Separator};
 
 let mut json_obj = json!({
     "settings": {
@@ -116,7 +158,11 @@ let mut json_obj = json!({
 });
 
 let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+let options = ParseOptions::new(Separator::Dot)
+    .strict_json_values(true)
+    .max_path_depth(64)
+    .max_array_index(10_000);
+let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 
 jqesque.apply_to(&mut json_obj);
 
@@ -137,7 +183,7 @@ assert_eq!(json_obj, expected);
 
 ```rust
 use serde_json::json;
-use jqesque::{Jqesque, Separator};
+use jqesque::{Jqesque, ParseOptions, Separator};
 
 let mut json_obj = json!({
     "settings": {
@@ -150,7 +196,11 @@ let mut json_obj = json!({
 });
 
 let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+let options = ParseOptions::new(Separator::Dot)
+    .strict_json_values(true)
+    .max_path_depth(64)
+    .max_array_index(10_000);
+let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 
 jqesque.apply_to(&mut json_obj);
 
@@ -167,6 +217,41 @@ let expected = json!({
 assert_eq!(json_obj, expected);
 // Note that the "size" key in the original "theme" object is preserved.
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local quality checks, dependency/security checks,
+and fuzzing commands.
+
+## Benchmarking
+
+Benchmarks are split into small, file-scoped targets in `benches/` to improve fan-out and
+parallel CI execution.
+
+- `benches/parse_scalar_small_callgrind.rs`
+- `benches/parse_array_medium_callgrind.rs`
+- `benches/parse_deep_path_medium_callgrind.rs`
+- `benches/parse_object_large_callgrind.rs`
+- `benches/insert_object_small_callgrind.rs`
+- `benches/insert_array_sparse_medium_callgrind.rs`
+- `benches/insert_deep_path_medium_callgrind.rs`
+- `benches/insert_array_dense_large_callgrind.rs`
+- `benches/merge_object_small_callgrind.rs`
+- `benches/merge_array_medium_callgrind.rs`
+- `benches/merge_deep_object_large_callgrind.rs`
+
+Install the runner and run selected benchmark targets:
+
+```bash
+cargo install cargo-iai-callgrind
+cargo iai-callgrind --bench parse_scalar_small_callgrind
+cargo iai-callgrind --bench parse_object_large_callgrind
+cargo iai-callgrind --bench insert_array_sparse_medium_callgrind
+cargo iai-callgrind --bench merge_deep_object_large_callgrind
+```
+
+PR benchmark reporting and regression gating uses
+`terjekv/github-action-iai-callgrind` via `.github/workflows/bench.yml`.
 
 ## License
 
