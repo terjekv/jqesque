@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::{Pointer, PointerBuf, Token};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -36,11 +36,13 @@ impl ParseOptions {
         self
     }
 
+    /// Sets a parsing limit in addition to the global `DEFAULT_MAX_PATH_DEPTH` ceiling.
     pub fn max_path_depth(mut self, max_path_depth: usize) -> Self {
         self.max_path_depth = max_path_depth;
         self
     }
 
+    /// Sets a parsing limit in addition to the global `DEFAULT_MAX_ARRAY_INDEX` ceiling.
     pub fn max_array_index(mut self, max_array_index: usize) -> Self {
         self.max_array_index = max_array_index;
         self
@@ -63,7 +65,7 @@ impl ParseOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Jqesque {
     // The path tokens representing the path to the value (the left-hand side of the assignment)
     tokens: Vec<PathToken>,
@@ -71,6 +73,24 @@ pub struct Jqesque {
     value: Option<Value>,
     // The operation to perform
     operation: Operation,
+}
+
+impl<'de> Deserialize<'de> for Jqesque {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename = "Jqesque")]
+        struct Fields {
+            tokens: Vec<PathToken>,
+            value: Option<Value>,
+            operation: Operation,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.tokens, fields.value, fields.operation).map_err(serde::de::Error::custom)
+    }
 }
 
 impl FromStr for Jqesque {
@@ -103,24 +123,16 @@ impl FromStr for Jqesque {
 }
 
 impl Jqesque {
-    pub(crate) fn from_parts_unchecked(
-        tokens: Vec<PathToken>,
-        value: Option<Value>,
-        operation: Operation,
-    ) -> Self {
-        Self {
-            tokens,
-            value,
-            operation,
-        }
-    }
-
     pub fn new(
         tokens: Vec<PathToken>,
         value: Option<Value>,
         operation: Operation,
     ) -> Result<Self, JqesqueError> {
-        let jq = Self::from_parts_unchecked(tokens, value, operation);
+        let jq = Self {
+            tokens,
+            value,
+            operation,
+        };
         jq.validate_limits(DEFAULT_MAX_PATH_DEPTH, DEFAULT_MAX_ARRAY_INDEX)?;
         Ok(jq)
     }
@@ -293,8 +305,6 @@ impl Jqesque {
     ///
     /// Returns the operation that was performed or a JqesqueError if an error occurred.
     pub fn apply_to(&self, json: &mut Value) -> Result<Operation, JqesqueError> {
-        self.validate_limits(DEFAULT_MAX_PATH_DEPTH, DEFAULT_MAX_ARRAY_INDEX)?;
-
         match self.operation {
             Operation::Auto => {
                 // Try Replace

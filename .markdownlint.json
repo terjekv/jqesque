@@ -7,6 +7,9 @@
     },
     "MD033": false,
     "MD041": false,
+    "MD060": {
+        "style": "compact"
+    },
     "no-duplicate-heading": {
         "siblings_only": true
     }

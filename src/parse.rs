@@ -13,6 +13,12 @@ use serde_json::Value;
 
 type Res<T, U> = IResult<T, U, VerboseError<T>>;
 
+struct Assignment<'a> {
+    tokens: Vec<PathToken>,
+    value: Option<&'a str>,
+    operation: Operation,
+}
+
 /// Parses the input string into path tokens and a serde_json::Value.
 ///
 /// ## Arguments
@@ -32,35 +38,34 @@ pub fn parse_input_with_options(
     options: ParseOptions,
 ) -> Result<Jqesque, JqesqueError> {
     let sep_char = options.separator().as_char();
-    let strict_json_values = options.strict_json_values_enabled();
-    let res = all_consuming(|i| jqesque(i, sep_char, strict_json_values)).parse(input);
-    match res {
-        Ok((_, jqesque)) => {
-            jqesque.validate_limits(
-                options.max_path_depth_limit(),
-                options.max_array_index_limit(),
-            )?;
-            Ok(jqesque)
-        }
-        Err(err) => {
-            let err_msg = format!("{}", err);
-            if strict_json_values && err_msg.contains("Invalid JSON value in strict mode:") {
-                return Err(JqesqueError::InvalidJsonValueError(err_msg));
-            }
-            Err(JqesqueError::NomError(err_msg))
-        }
-    }
+    let (_, assignment) = all_consuming(|i| jqesque(i, sep_char))
+        .parse(input)
+        .map_err(|err| JqesqueError::NomError(err.to_string()))?;
+    let value = assignment
+        .value
+        .map(|value| json_value(value, options.strict_json_values_enabled()))
+        .transpose()?;
+    let jqesque = Jqesque::new(assignment.tokens, value, assignment.operation)?;
+    jqesque.validate_limits(
+        options.max_path_depth_limit(),
+        options.max_array_index_limit(),
+    )?;
+    Ok(jqesque)
 }
 
-fn jqesque(input: &str, separator: char, strict_json_values: bool) -> Res<&str, Jqesque> {
+fn jqesque(input: &str, separator: char) -> Res<&str, Assignment<'_>> {
     let (input, operation) = opt(operation_prefix).parse(input)?;
     let operation = operation.unwrap_or(Operation::Auto);
 
-    let (input, (tokens, value)) = assignment(input, separator, &operation, strict_json_values)?;
+    let (input, (tokens, value)) = assignment(input, separator, &operation)?;
 
     Ok((
         input,
-        Jqesque::from_parts_unchecked(tokens, value, operation),
+        Assignment {
+            tokens,
+            value,
+            operation,
+        },
     ))
 }
 
@@ -75,8 +80,7 @@ fn assignment<'a>(
     input: &'a str,
     separator: char,
     operation: &Operation,
-    strict_json_values: bool,
-) -> Res<&'a str, (Vec<PathToken>, Option<Value>)> {
+) -> Res<&'a str, (Vec<PathToken>, Option<&'a str>)> {
     let (input, tokens) = path(input, separator)?;
 
     let (input, value_opt) = match operation {
@@ -84,7 +88,7 @@ fn assignment<'a>(
         _ => {
             let (input, _) = char('=')(input)?;
             let (input, _) = opt(char(' ')).parse(input)?;
-            let (input, value) = json_value(input, strict_json_values)?;
+            let (input, value) = is_not("")(input)?;
             (input, Some(value))
         }
     };
@@ -148,14 +152,10 @@ fn quoted_string(input: &str) -> Res<&str, String> {
     .parse(input)
 }
 
-fn json_value(input: &str, strict_json_values: bool) -> Res<&str, Value> {
-    map_res(is_not(""), move |s: &str| {
-        if strict_json_values {
-            serde_json::from_str::<Value>(s)
-                .map_err(|e| format!("Invalid JSON value in strict mode: {e}"))
-        } else {
-            Ok(serde_json::from_str(s).unwrap_or(Value::String(s.to_string())))
-        }
-    })
-    .parse(input)
+fn json_value(input: &str, strict_json_values: bool) -> Result<Value, JqesqueError> {
+    match serde_json::from_str(input) {
+        Ok(value) => Ok(value),
+        Err(err) if strict_json_values => Err(JqesqueError::InvalidJsonValueError(err.to_string())),
+        Err(_) => Ok(Value::String(input.to_string())),
+    }
 }

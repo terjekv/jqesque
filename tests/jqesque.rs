@@ -314,10 +314,29 @@ fn test_as_json(#[case] input: &str, #[case] expected: serde_json::Value) {
     assert_eq!(json_obj, expected);
 }
 
-#[test]
-fn test_strict_json_values_rejects_unquoted_text() {
+#[rstest]
+#[case("key=value")]
+#[case("key={\"missing\":}")]
+#[case("key=[1,]")]
+#[case("key=true trailing")]
+fn test_strict_json_values_reports_json_errors(#[case] input: &str) {
     let options = ParseOptions::new(Separator::Dot).strict_json_values(true);
-    let parsed = Jqesque::from_str_with_options("key=value", options);
+    let parsed = Jqesque::from_str_with_options(input, options);
+    match parsed {
+        Err(JqesqueError::InvalidJsonValueError(message)) => {
+            assert!(message.contains("line 1 column"), "{message}");
+        }
+        result => panic!("Expected a JSON value error, got {result:?}"),
+    }
+}
+
+#[rstest]
+#[case("key..child=1")]
+#[case("key=")]
+#[case("\"Invalid JSON value in strict mode:\"..child=1")]
+fn test_strict_json_values_preserves_syntax_errors(#[case] input: &str) {
+    let options = ParseOptions::new(Separator::Dot).strict_json_values(true);
+    let parsed = Jqesque::from_str_with_options(input, options);
     assert!(matches!(parsed, Err(JqesqueError::NomError(_))));
 }
 
@@ -360,6 +379,23 @@ fn test_max_array_index_limit() {
     ));
 }
 
+#[rstest]
+#[case(">a.b=1", 2, 0, json!({"a": {"b": 1}}))]
+#[case(">a[2]=1", 2, 2, json!({"a": [null, null, 1]}))]
+#[case(">[0]=1", 1, 0, json!([1]))]
+fn test_parse_limits_accept_boundary_values(
+    #[case] input: &str,
+    #[case] depth: usize,
+    #[case] index: usize,
+    #[case] expected: serde_json::Value,
+) {
+    let options = ParseOptions::new(Separator::Dot)
+        .max_path_depth(depth)
+        .max_array_index(index);
+    let parsed = Jqesque::from_str_with_options(input, options).unwrap();
+    assert_eq!(parsed.as_json(), expected);
+}
+
 #[test]
 fn test_new_rejects_out_of_bounds_constructed_index() {
     let parsed = Jqesque::new(
@@ -377,5 +413,44 @@ fn test_new_rejects_out_of_bounds_constructed_index() {
             kind: "array index",
             ..
         })
+    ));
+}
+
+#[rstest]
+#[case(vec![PathToken::Index(DEFAULT_MAX_ARRAY_INDEX + 1)])]
+#[case(vec![PathToken::Index(usize::MAX)])]
+#[case(vec![PathToken::Key("a".into()); jqesque::DEFAULT_MAX_PATH_DEPTH + 1])]
+fn test_deserialization_rejects_paths_exceeding_safety_limits(#[case] tokens: Vec<PathToken>) {
+    let serialized = json!({
+        "tokens": tokens,
+        "value": 1,
+        "operation": "Insert",
+    });
+    let error = serde_json::from_value::<Jqesque>(serialized).unwrap_err();
+    assert!(error.to_string().contains("Limit exceeded"), "{error}");
+}
+
+#[rstest]
+#[case(">a[2].b=1")]
+#[case("~a={\"b\":true}")]
+#[case("-a[0]")]
+fn test_serialization_round_trip(#[case] input: &str) {
+    let parsed: Jqesque = input.parse().unwrap();
+    let serialized = serde_json::to_value(&parsed).unwrap();
+    let restored: Jqesque = serde_json::from_value(serialized).unwrap();
+    assert_eq!(restored, parsed);
+    assert_eq!(restored.as_json(), parsed.as_json());
+}
+
+#[rstest]
+#[case(format!(">a[{}]=1", DEFAULT_MAX_ARRAY_INDEX + 1))]
+#[case(format!(">{}=1", vec!["a"; jqesque::DEFAULT_MAX_PATH_DEPTH + 1].join(".")))]
+fn test_parse_options_cannot_bypass_safety_limits(#[case] input: String) {
+    let options = ParseOptions::new(Separator::Dot)
+        .max_path_depth(usize::MAX)
+        .max_array_index(usize::MAX);
+    assert!(matches!(
+        Jqesque::from_str_with_options(&input, options),
+        Err(JqesqueError::LimitExceededError { .. })
     ));
 }

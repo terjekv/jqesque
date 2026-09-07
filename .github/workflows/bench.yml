@@ -11,7 +11,7 @@ jobs:
   bench:
     uses: terjekv/github-action-iai-callgrind/.github/workflows/rust-pr-bench.yml@v2
     with:
-      backend: iai-callgrind
+      backend: gungraun
       auto_discover: true
-      regression_threshold_pct_iai_callgrind: 3
+      regression_threshold_pct_gungraun: 3
       fail_on_regression: true

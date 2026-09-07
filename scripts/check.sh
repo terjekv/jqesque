@@ -2,9 +2,10 @@
 set -euo pipefail
 
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo test --doc --all-features
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo test --doc --all-features --locked
+cargo check --manifest-path fuzz/Cargo.toml --bins
 
 if command -v cargo-deny >/dev/null 2>&1; then
   cargo deny check advisories bans sources

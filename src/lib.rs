@@ -52,7 +52,7 @@
 //! use jqesque::Jqesque;
 //! use serde_json::json;
 //!
-//! let input = ">foo.bar[0].baz=hello";
+//! let input = ">foo.bar[0].baz=\"hello\"";
 //! let jqesque = input.parse::<Jqesque>().unwrap();
 //! // Without using turbofish syntax:
 //! // let jqesque: Jqesque = input.parse().unwrap();

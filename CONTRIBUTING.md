@@ -14,9 +14,10 @@ Equivalent manual commands:
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-cargo test --doc --all-features
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo test --doc --all-features --locked
+cargo check --manifest-path fuzz/Cargo.toml --bins
 ```
 
 ## Security checks
@@ -54,21 +55,21 @@ cargo fuzz run deep_paths_indices -- -max_total_time=60
 
 ## Benchmarks
 
-This repository uses `iai-callgrind` benchmark targets in `benches/`.
+This repository uses `gungraun` benchmark targets in `benches/`.
 
 Install the runner:
 
 ```bash
-cargo install cargo-iai-callgrind
+cargo install gungraun-runner --version 0.19.4 --locked
 ```
 
 Run selected callgrind benchmarks:
 
 ```bash
-cargo iai-callgrind --bench parse_scalar_small_callgrind
-cargo iai-callgrind --bench parse_object_large_callgrind
-cargo iai-callgrind --bench insert_array_sparse_medium_callgrind
-cargo iai-callgrind --bench merge_deep_object_large_callgrind
+cargo bench --bench parse_scalar_small_callgrind
+cargo bench --bench parse_object_large_callgrind
+cargo bench --bench insert_array_sparse_medium_callgrind
+cargo bench --bench merge_deep_object_large_callgrind
 ```
 
 Available benchmark targets are intentionally split by scenario and size to maximize fan-out:
