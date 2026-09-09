@@ -87,4 +87,12 @@ Available benchmark targets are intentionally split by scenario and size to maxi
 - `merge_deep_object_large_callgrind`
 
 CI runs PR benchmarks through the reusable workflow in
-`terjekv/github-action-iai-callgrind`.
+[`terjekv/rust-pr-bench`](https://github.com/terjekv/rust-pr-bench).
+
+The workflow pins `v1.3.0` and enables Cargo, runner, and executable caching in the `jqesque-bench` namespace.
+Pushes to `main` compile the benchmarks to warm caches that subsequent PRs can restore. PR runs still measure both
+revisions and fail on regressions above 3%; only matching builds can reuse cached executables.
+
+Executable reuse assumes reproducible builds. If benchmarks gain external compile-time inputs or runtime assets,
+declare them with `binary_cache_key` or `binary_cache_paths` as described in the
+[caching guide](https://github.com/terjekv/rust-pr-bench/blob/v1.3.0/docs/caching.md).

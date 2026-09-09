@@ -13,6 +13,30 @@ use crate::parse::{parse_input, parse_input_with_options};
 pub const DEFAULT_MAX_PATH_DEPTH: usize = 128;
 pub const DEFAULT_MAX_ARRAY_INDEX: usize = 1_000_000;
 
+#[derive(Clone, Copy)]
+pub(crate) struct PathDepthLimit(usize);
+
+impl PathDepthLimit {
+    pub(crate) fn new(requested: usize) -> Self {
+        Self(requested.min(DEFAULT_MAX_PATH_DEPTH))
+    }
+
+    pub(crate) fn get(self) -> usize {
+        self.0
+    }
+
+    pub(crate) fn check_next_token(self, depth: usize) -> Result<(), JqesqueError> {
+        if depth >= self.0 {
+            return Err(JqesqueError::LimitExceededError {
+                kind: "path depth",
+                limit: self.0,
+                found: depth.saturating_add(1),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ParseOptions {
     separator: Separator,
@@ -37,6 +61,8 @@ impl ParseOptions {
     }
 
     /// Sets a parsing limit in addition to the global `DEFAULT_MAX_PATH_DEPTH` ceiling.
+    /// Each key and bracketed index counts as one token. Parsing stops before allocating an
+    /// excess token or decoding the value, reporting the first excess depth as `found`.
     pub fn max_path_depth(mut self, max_path_depth: usize) -> Self {
         self.max_path_depth = max_path_depth;
         self

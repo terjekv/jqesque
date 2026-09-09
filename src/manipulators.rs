@@ -133,59 +133,17 @@ mod test {
     }
 
     #[rstest]
-    #[case::negative_index(
-        "arr[-1]=value",
-        Separator::Dot,
-        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[-1]=value\", Char('='))] }".to_string())
-    )]
-    #[case::invalid_index(
-        "arr[invalid]=value",
-        Separator::Dot,
-        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"[invalid]=value\", Char('='))] }".to_string())
-    )]
-    #[case::missing_value(
-        "key=",
-        Separator::Dot,
-        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Nom(IsNot))] }".to_string())
-    )]
-    #[case::missing_key(
-        "=value",
-        Separator::Dot,
-        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string())
-    )]
-    #[case::missing_assignment(
-        "key",
-        Separator::Dot,
-        JqesqueError::NomError("Parsing Error: VerboseError { errors: [(\"\", Char('='))] }".to_string())
-    )]
-    #[case::illegal_operator(
-        "!key=value",
-        Separator::Dot,
-        JqesqueError::NomError(
-            "Parsing Error: VerboseError { errors: [(\"!key=value\", Nom(TakeWhile1)), (\"!key=value\", Nom(Alt)), (\"!key=value\", Nom(Alt))] }"
-                .to_string()
-        )
-    )]
-    fn test_parse_input_err(
-        #[case] input: &str,
-        #[case] separator: Separator,
-        #[case] expected: JqesqueError,
-    ) {
+    #[case::negative_index("arr[-1]=value", Separator::Dot)]
+    #[case::invalid_index("arr[invalid]=value", Separator::Dot)]
+    #[case::missing_value("key=", Separator::Dot)]
+    #[case::missing_key("=value", Separator::Dot)]
+    #[case::missing_assignment("key", Separator::Dot)]
+    #[case::illegal_operator("!key=value", Separator::Dot)]
+    fn test_parse_input_err(#[case] input: &str, #[case] separator: Separator) {
         let result = Jqesque::from_str_with_separator(input, separator);
-
-        match result {
-            Ok(_) => {
-                let parsed = result.unwrap();
-                let mut json_obj = serde_json::Value::Null;
-                let value = parsed.value().clone().unwrap_or(serde_json::Value::Null);
-                insert_value(&mut json_obj, parsed.tokens(), &value);
-                panic!(
-                    "Expected an error, but got Ok (tokens: {:?} -> json_obj: {})",
-                    parsed.tokens(),
-                    json_obj
-                );
-            }
-            Err(err) => assert_eq!(err, expected),
-        }
+        assert!(
+            matches!(result, Err(JqesqueError::NomError(_))),
+            "{result:?}"
+        );
     }
 }

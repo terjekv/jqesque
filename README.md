@@ -67,7 +67,9 @@ When parsing untrusted input (e.g. from HTTP requests, CLI arguments, or config 
 `ParseOptions` to bound resource usage and enforce strict value parsing.
 
 - `strict_json_values(true)`: require the right-hand side to be valid JSON.
-- `max_path_depth(n)`: reject deeply nested paths.
+- `max_path_depth(n)`: reject deeply nested paths during tokenization, before decoding the value.
+  Each key and bracketed index counts as one token. At the first excess token, parsing returns `LimitExceededError`
+  with `found` equal to `limit + 1`, without checking the remaining path syntax or value.
 - `max_array_index(n)`: reject oversized array indices.
 
 The default limits are exported as `DEFAULT_MAX_PATH_DEPTH` and `DEFAULT_MAX_ARRAY_INDEX`.
@@ -267,8 +269,10 @@ cargo bench --bench insert_array_sparse_medium_callgrind
 cargo bench --bench merge_deep_object_large_callgrind
 ```
 
-PR benchmark reporting and regression gating uses
-`terjekv/github-action-iai-callgrind` via `.github/workflows/bench.yml`.
+PR benchmark reporting and regression gating use the parallel reusable workflow from
+[`terjekv/rust-pr-bench`](https://github.com/terjekv/rust-pr-bench) via `.github/workflows/bench.yml`.
+Benchmark CI caches Cargo dependencies, build outputs, runners, and compatible executables. Pushes to `main`
+warm the build caches; pull requests run fresh base and head measurements with the 3% regression gate.
 
 ## Changelog
 

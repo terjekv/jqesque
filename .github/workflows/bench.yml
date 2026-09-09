@@ -2,6 +2,8 @@ name: PR Benchmarks
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -9,9 +11,15 @@ permissions:
 
 jobs:
   bench:
-    uses: terjekv/github-action-iai-callgrind/.github/workflows/rust-pr-bench.yml@v2
+    uses: terjekv/rust-pr-bench/.github/workflows/rust-pr-bench.yml@v1.3.0
     with:
       backend: gungraun
       auto_discover: true
+      cache: true
+      cache_namespace: jqesque-bench
+      cache_binaries: true
+      # Main-branch caches are available to subsequent pull requests.
+      compile_only: ${{ github.event_name == 'push' }}
+      comment_mode: ${{ github.event_name == 'pull_request' && 'always' || 'never' }}
       regression_threshold_pct_gungraun: 3
       fail_on_regression: true

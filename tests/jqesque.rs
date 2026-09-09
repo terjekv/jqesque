@@ -1,5 +1,6 @@
 use jqesque::{
     Jqesque, JqesqueError, Operation, ParseOptions, PathToken, Separator, DEFAULT_MAX_ARRAY_INDEX,
+    DEFAULT_MAX_PATH_DEPTH,
 };
 use rstest::rstest;
 use serde_json::json;
@@ -351,18 +352,129 @@ fn test_strict_json_values_accepts_valid_json() {
     assert_eq!(json_obj, json!({"key": "value"}));
 }
 
-#[test]
-fn test_max_path_depth_limit() {
-    let options = ParseOptions::new(Separator::Dot).max_path_depth(2);
-    let parsed = Jqesque::from_str_with_options("a.b.c=1", options);
+#[rstest]
+#[case("a.b.c=1", Separator::Dot, 2)]
+#[case("a[0][0]=1", Separator::Dot, 2)]
+#[case("[0][0][0]=1", Separator::Dot, 2)]
+#[case("a[0].b=1", Separator::Dot, 2)]
+#[case("a/[0]/b=1", Separator::Slash, 2)]
+#[case("a:[0]:b=1", Separator::Custom(':'), 2)]
+#[case("\"a.b\".\"c.d\"[0]=1", Separator::Dot, 2)]
+#[case("-a.b.c", Separator::Dot, 2)]
+#[case("a=1", Separator::Dot, 0)]
+#[case("[0]=1", Separator::Dot, 0)]
+fn test_max_path_depth_limit(
+    #[case] input: &str,
+    #[case] separator: Separator,
+    #[case] depth: usize,
+) {
+    let options = ParseOptions::new(separator).max_path_depth(depth);
+    let parsed = Jqesque::from_str_with_options(input, options);
 
     assert!(matches!(
         parsed,
         Err(JqesqueError::LimitExceededError {
             kind: "path depth",
-            ..
+            limit,
+            found,
+        }) if limit == depth && found == depth + 1
+    ));
+}
+
+#[rstest]
+#[case(".a")]
+#[case("[0]")]
+#[case(".\"a.b\"")]
+fn test_path_depth_stops_at_first_excess_token(#[case] segment: &str) {
+    // The malformed suffix must never be reached, even in permissive value mode.
+    let input = format!("a{}[invalid]=not json", segment.repeat(100_000));
+    let options = ParseOptions::new(Separator::Dot).max_path_depth(2);
+    assert!(matches!(
+        Jqesque::from_str_with_options(&input, options),
+        Err(JqesqueError::LimitExceededError {
+            kind: "path depth",
+            limit: 2,
+            found: 3,
         })
     ));
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn test_path_depth_checked_before_value_decoding(#[case] strict: bool) {
+    let input = format!("a.b.c={}", "not json".repeat(100_000));
+    let options = ParseOptions::new(Separator::Dot)
+        .max_path_depth(2)
+        .strict_json_values(strict);
+    assert!(matches!(
+        Jqesque::from_str_with_options(&input, options),
+        Err(JqesqueError::LimitExceededError {
+            kind: "path depth",
+            limit: 2,
+            found: 3,
+        })
+    ));
+}
+
+#[rstest]
+#[case(DEFAULT_MAX_PATH_DEPTH)]
+#[case(usize::MAX)]
+fn test_effective_path_depth_ceiling_stops_tokenization(#[case] requested: usize) {
+    let input = format!("a{}=not json", ".a".repeat(100_000));
+    let options = ParseOptions::new(Separator::Dot)
+        .max_path_depth(requested)
+        .strict_json_values(true);
+    assert!(matches!(
+        Jqesque::from_str_with_options(&input, options),
+        Err(JqesqueError::LimitExceededError {
+            kind: "path depth",
+            limit: DEFAULT_MAX_PATH_DEPTH,
+            found,
+        }) if found == DEFAULT_MAX_PATH_DEPTH + 1
+    ));
+}
+
+#[rstest]
+#[case("a.b.=1")]
+#[case("a..b=1")]
+#[case("a[bad]=1")]
+#[case("a[0=1")]
+#[case("a[999999999999999999999999999999999999]=1")]
+#[case("a.\"unterminated=1")]
+fn test_malformed_path_within_depth_limit(#[case] input: &str) {
+    let options = ParseOptions::new(Separator::Dot).max_path_depth(2);
+    assert!(matches!(
+        Jqesque::from_str_with_options(input, options),
+        Err(JqesqueError::NomError(_))
+    ));
+}
+
+#[rstest]
+#[case("a[0][1]=1", Separator::Dot, 3)]
+#[case("[0][1]=1", Separator::Dot, 2)]
+#[case("\"a.b\"[0]=1", Separator::Dot, 2)]
+#[case("a/[0]=1", Separator::Slash, 2)]
+#[case("a:[0]=1", Separator::Custom(':'), 2)]
+#[case("a={\"b\":1}", Separator::Custom('='), 1)]
+#[case("a=[]", Separator::Custom('='), 1)]
+#[case("a=\"unterminated", Separator::Custom('='), 1)]
+#[case("-a[0]", Separator::Dot, 2)]
+fn test_path_tokenization_accepts_exact_depth(
+    #[case] input: &str,
+    #[case] separator: Separator,
+    #[case] depth: usize,
+) {
+    let options = ParseOptions::new(separator).max_path_depth(depth);
+    let parsed = Jqesque::from_str_with_options(input, options).unwrap();
+    assert_eq!(parsed.tokens().len(), depth);
+}
+
+#[test]
+fn test_default_path_depth_accepts_exact_ceiling() {
+    let input = format!("a{}=1", ".a".repeat(DEFAULT_MAX_PATH_DEPTH - 1));
+    let parsed: Jqesque = input.parse().unwrap();
+    assert_eq!(parsed.tokens().len(), DEFAULT_MAX_PATH_DEPTH);
 }
 
 #[test]

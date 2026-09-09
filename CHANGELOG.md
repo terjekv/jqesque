@@ -13,7 +13,9 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Added CI workflows for formatting, linting, tests, doc tests, dependency policy checks, and advisory scans.
 - Added fuzzing harness and targets for parser/apply paths and deep path/index stress scenarios.
 - Added benchmark infrastructure with Gungraun and scenario-specific fan-out benchmark targets.
-- Added PR benchmark workflow integration using terjekv/github-action-iai-callgrind.
+- Added PR benchmark workflow integration using `terjekv/rust-pr-bench@v1.3.0`, with parallel target discovery
+  and a 3% regression gate.
+- Cache benchmark dependencies, build outputs, runners, and compatible executables, with build-cache warming on `main`.
 - Added CONTRIBUTING guide and local quality/security helper script.
 
 ### Changed
@@ -36,6 +38,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Security
 
+- Enforce effective path depth limits during tokenization, before allocating excess keys or indices or decoding values.
+  Parsing stops at the first excess token, reporting `found` as `limit + 1` without inspecting the remaining input.
 - Strengthened protections against resource-exhaustion style inputs by enforcing parse/apply safety limits.
 - Enforced path invariants at construction and deserialization so `as_json()` cannot bypass resource limits.
 - Replaced the obsolete iai-callgrind dependency chain with Gungraun and removed the bincode advisory exception.
