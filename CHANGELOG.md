@@ -24,6 +24,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
   and field reads with `tokens()`, `value()`, and `operation()`.
 - **Breaking:** Parsing and deserialization now reject paths deeper than 128 tokens or indices above 1,000,000.
   Custom options can tighten these ceilings. Split oversized assignments or reduce indices before upgrading.
+- **Breaking:** `JqesqueError` adds `InvalidJsonValueError` and `LimitExceededError`. Update exhaustive matches
+  to handle these variants.
 - Migrated parameterized tests from yare to rstest.
 - Encapsulated Jqesque internals with constructor/getter APIs and limit validation on apply paths.
 - Reduced clone churn in insert path manipulation by passing values by reference in recursion.
