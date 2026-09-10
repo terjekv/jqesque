@@ -52,12 +52,16 @@
 //! use jqesque::Jqesque;
 //! use serde_json::json;
 //!
-//! let input = ">foo.bar[0].baz=hello";
+//! let input = ">foo.bar[0].baz=\"hello\"";
 //! let jqesque = input.parse::<Jqesque>().unwrap();
 //! // Without using turbofish syntax:
 //! // let jqesque: Jqesque = input.parse().unwrap();
-//! // Alternatively, if you want to specify the separator:
-//! // let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+//! // Recommended for untrusted input:
+//! // let options = ParseOptions::new(Separator::Dot)
+//! //     .strict_json_values(true)
+//! //     .max_path_depth(64)
+//! //     .max_array_index(10_000);
+//! // let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 //!
 //! let json_output = jqesque.as_json();
 //! assert_eq!(json_output, json!({
@@ -74,11 +78,15 @@
 //! ### Specifying the separator
 //!
 //! ```rust
-//! use jqesque::{Jqesque, Separator};
+//! use jqesque::{Jqesque, ParseOptions, Separator};
 //! use serde_json::json;
 //!
 //! let input = ">foo/bar[0]/baz=true";
-//! let jqesque = Jqesque::from_str_with_separator(input, Separator::Slash).unwrap();
+//! let options = ParseOptions::new(Separator::Slash)
+//!     .strict_json_values(true)
+//!     .max_path_depth(64)
+//!     .max_array_index(10_000);
+//! let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 //! let json_output = jqesque.as_json();
 //!
 //! assert_eq!(json_output, json!({
@@ -96,7 +104,7 @@
 //!
 //! ```rust
 //! use serde_json::json;
-//! use jqesque::{Jqesque, Separator};
+//! use jqesque::{Jqesque, ParseOptions, Separator};
 //!
 //! let mut json_obj = json!({
 //!     "settings": {
@@ -109,7 +117,11 @@
 //! });
 //!
 //! let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-//! let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+//! let options = ParseOptions::new(Separator::Dot)
+//!     .strict_json_values(true)
+//!     .max_path_depth(64)
+//!     .max_array_index(10_000);
+//! let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 //!
 //! jqesque.apply_to(&mut json_obj);
 //!
@@ -137,7 +149,7 @@
 //!
 //! ```rust
 //! use serde_json::json;
-//! use jqesque::{Jqesque, Separator};
+//! use jqesque::{Jqesque, ParseOptions, Separator};
 //!
 //! let mut json_obj = json!({
 //!     "settings": {
@@ -150,7 +162,11 @@
 //! });
 //!
 //! let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-//! let jqesque = Jqesque::from_str_with_separator(input, Separator::Dot).unwrap();
+//! let options = ParseOptions::new(Separator::Dot)
+//!     .strict_json_values(true)
+//!     .max_path_depth(64)
+//!     .max_array_index(10_000);
+//! let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
 //!
 //! jqesque.apply_to(&mut json_obj);
 //!
@@ -176,4 +192,7 @@ mod manipulators;
 mod parse;
 mod types;
 
-pub use types::{Jqesque, JqesqueError, Operation, PathToken, Separator};
+pub use types::{
+    Jqesque, JqesqueError, Operation, ParseOptions, PathToken, Separator, DEFAULT_MAX_ARRAY_INDEX,
+    DEFAULT_MAX_PATH_DEPTH,
+};
