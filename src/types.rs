@@ -1,505 +1,31 @@
-use std::fmt::Display;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
-use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
-use jsonptr::{Pointer, PointerBuf, Token};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
-use thiserror::Error;
 
-use crate::manipulators::{insert_value, merge_json};
-use crate::parse::{parse_input, parse_input_with_options};
+use crate::manipulators::{
+    apply_at_path, check_patch_path, numeric_json_eq, path_array_growth, prepare_patch, resolve,
+};
+use crate::parse::parse_input_with_options;
 
-pub const DEFAULT_MAX_PATH_DEPTH: usize = 128;
-pub const DEFAULT_MAX_ARRAY_INDEX: usize = 1_000_000;
+mod batch;
+mod errors;
+mod options;
+mod path;
+mod serde_support;
+mod value;
+use value::check_clone;
+pub(crate) use value::discard;
+pub(crate) use value::ValidatedValue;
 
-#[derive(Clone, Copy)]
-pub(crate) struct PathDepthLimit(usize);
+pub use batch::{Batch, BatchError};
+pub(crate) use errors::check_limit;
+pub use errors::{JqesqueError, LimitKind, PathErrorKind, SourceLocation, SyntaxKind};
+pub use options::*;
+pub(crate) use path::PathBuilder;
+pub use path::{Path, PathToken};
 
-impl PathDepthLimit {
-    pub(crate) fn new(requested: usize) -> Self {
-        Self(requested.min(DEFAULT_MAX_PATH_DEPTH))
-    }
-
-    pub(crate) fn get(self) -> usize {
-        self.0
-    }
-
-    pub(crate) fn check_next_token(self, depth: usize) -> Result<(), JqesqueError> {
-        if depth >= self.0 {
-            return Err(JqesqueError::LimitExceededError {
-                kind: "path depth",
-                limit: self.0,
-                found: depth.saturating_add(1),
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ParseOptions {
-    separator: Separator,
-    strict_json_values: bool,
-    max_path_depth: usize,
-    max_array_index: usize,
-}
-
-impl ParseOptions {
-    pub fn new(separator: Separator) -> Self {
-        Self {
-            separator,
-            strict_json_values: false,
-            max_path_depth: DEFAULT_MAX_PATH_DEPTH,
-            max_array_index: DEFAULT_MAX_ARRAY_INDEX,
-        }
-    }
-
-    pub fn strict_json_values(mut self, strict_json_values: bool) -> Self {
-        self.strict_json_values = strict_json_values;
-        self
-    }
-
-    /// Sets a parsing limit in addition to the global `DEFAULT_MAX_PATH_DEPTH` ceiling.
-    /// Each key and bracketed index counts as one token. Parsing stops before allocating an
-    /// excess token or decoding the value, reporting the first excess depth as `found`.
-    pub fn max_path_depth(mut self, max_path_depth: usize) -> Self {
-        self.max_path_depth = max_path_depth;
-        self
-    }
-
-    /// Sets a parsing limit in addition to the global `DEFAULT_MAX_ARRAY_INDEX` ceiling.
-    pub fn max_array_index(mut self, max_array_index: usize) -> Self {
-        self.max_array_index = max_array_index;
-        self
-    }
-
-    pub fn separator(&self) -> Separator {
-        self.separator
-    }
-
-    pub fn strict_json_values_enabled(&self) -> bool {
-        self.strict_json_values
-    }
-
-    pub fn max_path_depth_limit(&self) -> usize {
-        self.max_path_depth
-    }
-
-    pub fn max_array_index_limit(&self) -> usize {
-        self.max_array_index
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Jqesque {
-    // The path tokens representing the path to the value (the left-hand side of the assignment)
-    tokens: Vec<PathToken>,
-    // The value itself (the right-hand side of the assignment)
-    value: Option<Value>,
-    // The operation to perform
-    operation: Operation,
-}
-
-impl<'de> Deserialize<'de> for Jqesque {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename = "Jqesque")]
-        struct Fields {
-            tokens: Vec<PathToken>,
-            value: Option<Value>,
-            operation: Operation,
-        }
-
-        let fields = Fields::deserialize(deserializer)?;
-        Self::new(fields.tokens, fields.value, fields.operation).map_err(serde::de::Error::custom)
-    }
-}
-
-impl FromStr for Jqesque {
-    type Err = JqesqueError;
-
-    /// Parses an input string into a `Jqesque` structure using the default separator of `Separator::Dot`.
-    ///
-    /// ## Arguments
-    ///
-    /// * `input` - The input string to parse
-    ///
-    /// ## Returns
-    ///
-    /// Returns a `Jqesque` structure if successful, or a `ParseError` if parsing fails.
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// use jqesque::Jqesque;
-    ///
-    /// // Input string to parse
-    /// let input = "foo.bar[0].baz=hello";
-    /// let jqesque = input.parse::<Jqesque>().unwrap();
-    /// // Without turbofish syntax:
-    /// // let jqesque: Jqesque = input.parse().unwrap();
-    /// ``````
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        parse_input(input, Separator::Dot)
-    }
-}
-
-impl Jqesque {
-    pub fn new(
-        tokens: Vec<PathToken>,
-        value: Option<Value>,
-        operation: Operation,
-    ) -> Result<Self, JqesqueError> {
-        let jq = Self {
-            tokens,
-            value,
-            operation,
-        };
-        jq.validate_limits(DEFAULT_MAX_PATH_DEPTH, DEFAULT_MAX_ARRAY_INDEX)?;
-        Ok(jq)
-    }
-
-    /// Parses an input string into a `Jqesque` structure using the specified separator.
-    ///
-    /// This is a convenience API for trusted or simple inputs.
-    /// For untrusted input, prefer `from_str_with_options` so you can configure
-    /// strict parsing and resource limits.
-    ///
-    /// ## Arguments
-    ///
-    /// * `input` - The input string to parse
-    /// * `separator` - The separator to use between keys (e.g., `Separator::Dot`, `Separator::Slash`, or `Separator::Custom(char)`)
-    ///
-    /// ## Input operators
-    ///
-    /// The input string can optionally start with an operator character to specify the operation to perform.
-    ///
-    /// * `>` - **Insert:** Inserts the value into the JSON object at the specified path, using a custom insert operation.
-    /// * `~` - **Merge:** Merges the value into the JSON object at the specified path, using a custom merge operation.
-    /// * `+` - **Add:** Adds the value to the JSON object at the specified path, using the JSON Patch `add` operation.
-    /// * `-` - **Remove:** Removes the value from the JSON object at the specified path, using the JSON Patch `remove` operation.
-    /// * `=` - **Replace:** Replaces the value in the JSON object at the specified path, using the JSON Patch `replace` operation.
-    /// * `?` - **Test:** Tests the value in the JSON object at the specified path, using the JSON Patch `test` operation.
-    ///
-    /// If no operator is specified, the default operator is `Insert`. For details on each operation, see their respective
-    /// fields in the `Operation` enum.
-    ///
-    /// ## Returns
-    ///
-    /// Returns a `Jqesque` structure if successful, or a `ParseError` if parsing fails.
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// use jqesque::{Jqesque, Separator};
-    ///
-    /// // Input string to parse
-    /// let input = "foo.bar[0].baz=hello";
-    /// let separator = Separator::Dot;
-    /// let jqesque = Jqesque::from_str_with_separator(input, separator).unwrap();
-    /// ```
-    pub fn from_str_with_separator(
-        input: &str,
-        separator: Separator,
-    ) -> Result<Self, JqesqueError> {
-        parse_input(input, separator)
-    }
-
-    /// Parses an input string into a `Jqesque` structure using parse options.
-    ///
-    /// This is the recommended API for untrusted input because it allows
-    /// strict JSON value parsing and configurable safety limits.
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// use jqesque::{Jqesque, ParseOptions, Separator};
-    ///
-    /// let options = ParseOptions::new(Separator::Dot)
-    ///     .strict_json_values(true)
-    ///     .max_path_depth(64)
-    ///     .max_array_index(10_000);
-    ///
-    /// let jqesque = Jqesque::from_str_with_options("foo.bar=\"baz\"", options).unwrap();
-    /// assert_eq!(jqesque.tokens().len(), 2);
-    /// ```
-    pub fn from_str_with_options(input: &str, options: ParseOptions) -> Result<Self, JqesqueError> {
-        parse_input_with_options(input, options)
-    }
-
-    /// Returns the path tokens of the parsed structure.
-    pub fn tokens(&self) -> &[PathToken] {
-        &self.tokens
-    }
-
-    /// Returns the value from the parsed structure.
-    ///
-    /// This function returns a reference to the `serde_json::Value` object that was parsed.
-    ///
-    /// ## Returns
-    ///
-    /// Returns a reference to a `serde_json::Value` object.
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// use serde_json::Value;
-    /// use jqesque::Jqesque;
-    ///
-    /// // Input string to parse
-    /// let input = "foo.bar[0].baz=hello";
-    /// let jqesque = input.parse::<Jqesque>().unwrap();
-    ///
-    /// match jqesque.value() {
-    ///    Some(value) => {
-    ///       assert_eq!(value, &serde_json::json!("hello"));
-    ///   }
-    ///   None => {
-    ///     panic!("Expected a value, but found None");
-    ///   }
-    /// }
-    /// ```
-    pub fn value(&self) -> &Option<Value> {
-        &self.value
-    }
-
-    /// Returns the parsed operation.
-    pub fn operation(&self) -> &Operation {
-        &self.operation
-    }
-
-    /// Converts the parsed structure into a new JSON object.
-    ///
-    /// This function returns a new JSON object representing the parsed structure.
-    ///
-    /// ## Returns
-    ///
-    /// Returns a `serde_json::Value` object.
-    pub fn as_json(&self) -> Value {
-        match self.operation {
-            Operation::Auto => {
-                // For auto, return as an array of operations
-                let mut json_obj = Value::Array(Vec::new());
-                for op in &[Operation::Replace, Operation::Add, Operation::Insert] {
-                    let mut jq = self.clone();
-                    jq.operation = op.clone();
-                    let op_json = jq.as_json();
-                    json_obj.as_array_mut().unwrap().push(op_json);
-                }
-                json_obj
-            }
-            Operation::Add | Operation::Replace | Operation::Remove | Operation::Test => {
-                let pointer_buf = self.tokens_to_pointer();
-                let op_json = match self.operation {
-                    Operation::Add | Operation::Replace | Operation::Test => json!({
-                        "op": self.operation.to_string(),
-                        "path": pointer_buf.to_string(),
-                        "value": self.value.clone().unwrap_or(Value::Null)
-                    }),
-                    Operation::Remove => json!({
-                        "op": self.operation.to_string(),
-                        "path": pointer_buf.to_string()
-                    }),
-                    _ => unreachable!(),
-                };
-                json!([op_json]) // Return as an array of operations
-            }
-            Operation::Merge | Operation::Insert => {
-                // For merge and insert, return the value to be merged or inserted
-                let mut json_obj = Value::Null;
-                let value = self.value.as_ref().unwrap_or(&Value::Null);
-                insert_value(&mut json_obj, &self.tokens, value);
-                json_obj
-            }
-        }
-    }
-
-    /// Applies the parsed structure to a JSON object.
-    ///
-    /// This function applies the parsed structure to the provided JSON object, performing the operation specified
-    /// during parsing. The operation is performed in-place, modifying the provided JSON object.
-    ///
-    /// ## Arguments
-    ///
-    /// * `json` - The JSON object to apply the operation to
-    ///
-    /// ## Returns
-    ///
-    /// Returns the operation that was performed or a JqesqueError if an error occurred.
-    pub fn apply_to(&self, json: &mut Value) -> Result<Operation, JqesqueError> {
-        match self.operation {
-            Operation::Auto => {
-                // Try Replace
-                let mut jq_replace = self.clone();
-                jq_replace.operation = Operation::Replace;
-                if jq_replace.apply_to(json).is_ok() {
-                    return Ok(Operation::Replace);
-                }
-
-                // Try Add
-                let mut jq_add = self.clone();
-                jq_add.operation = Operation::Add;
-                if jq_add.apply_to(json).is_ok() {
-                    return Ok(Operation::Add);
-                }
-
-                // Fallback to Insert
-                let mut jq_insert = self.clone();
-                jq_insert.operation = Operation::Insert;
-                jq_insert.apply_to(json)
-            }
-            Operation::Add | Operation::Replace => {
-                if let Some(ref value) = self.value {
-                    let pointer_buf = self.tokens_to_pointer();
-
-                    let patch_op = match self.operation {
-                        Operation::Add => PatchOperation::Add(AddOperation {
-                            path: pointer_buf,
-                            value: value.clone(),
-                        }),
-                        Operation::Replace => PatchOperation::Replace(ReplaceOperation {
-                            path: pointer_buf,
-                            value: value.clone(),
-                        }),
-                        _ => unreachable!(),
-                    };
-
-                    let patch = Patch(vec![patch_op]);
-                    json_patch::patch(json, &patch)
-                        .map_err(|e| JqesqueError::PatchError(e.to_string()))?;
-                    Ok(self.operation.clone())
-                } else {
-                    Err(JqesqueError::MissingValueError(self.operation.clone()))
-                }
-            }
-            Operation::Remove => {
-                let pointer_buf = self.tokens_to_pointer();
-
-                let patch_op = PatchOperation::Remove(RemoveOperation { path: pointer_buf });
-                let patch = Patch(vec![patch_op]);
-                json_patch::patch(json, &patch)
-                    .map_err(|e| JqesqueError::PatchError(e.to_string()))?;
-                Ok(Operation::Remove)
-            }
-            Operation::Test => {
-                if let Some(ref expected_value) = self.value {
-                    let pointer_buf = self.tokens_to_pointer();
-                    let pointer: &Pointer = &pointer_buf;
-
-                    match pointer.resolve(json) {
-                        Ok(actual_value) => {
-                            if actual_value == expected_value {
-                                Ok(Operation::Test)
-                            } else {
-                                Err(JqesqueError::TestFailedError {
-                                    expected: expected_value.clone(),
-                                    actual: actual_value.clone(),
-                                })
-                            }
-                        }
-                        Err(e) => Err(JqesqueError::InvalidPathError(e.to_string())),
-                    }
-                } else {
-                    Err(JqesqueError::MissingValueError(self.operation.clone()))
-                }
-            }
-            Operation::Merge => {
-                // Assuming no errors occur during merge
-                let mut temp_value = Value::Null;
-                let value = self.value.as_ref().unwrap_or(&Value::Null);
-                insert_value(&mut temp_value, &self.tokens, value);
-                merge_json(json, &mut temp_value);
-                Ok(Operation::Merge)
-            }
-            Operation::Insert => {
-                // Assuming no errors occur during insert
-                let value = self.value.as_ref().unwrap_or(&Value::Null);
-                insert_value(json, &self.tokens, value);
-                Ok(Operation::Insert)
-            }
-        }
-    }
-
-    pub fn validate_limits(
-        &self,
-        max_path_depth: usize,
-        max_array_index: usize,
-    ) -> Result<(), JqesqueError> {
-        if self.tokens.len() > max_path_depth {
-            return Err(JqesqueError::LimitExceededError {
-                kind: "path depth",
-                limit: max_path_depth,
-                found: self.tokens.len(),
-            });
-        }
-
-        let max_found_index = self
-            .tokens
-            .iter()
-            .filter_map(|token| match token {
-                PathToken::Index(index) => Some(*index),
-                _ => None,
-            })
-            .max();
-
-        if let Some(index) = max_found_index {
-            if index > max_array_index {
-                return Err(JqesqueError::LimitExceededError {
-                    kind: "array index",
-                    limit: max_array_index,
-                    found: index,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Converts the path tokens to a JSON Pointer.
-    ///
-    /// This function converts the path tokens to a JSON Pointer, which is a string representation of the path.
-    ///
-    /// ## Returns
-    ///
-    /// Returns a `PointerBuf` object representing the path tokens.
-    fn tokens_to_pointer(&self) -> PointerBuf {
-        let tokens = self.tokens.iter().map(|token| match token {
-            PathToken::Key(ref key) => Token::new(escape_json_pointer_segment(key)),
-            PathToken::Index(idx) => Token::new(idx.to_string()),
-        });
-
-        PointerBuf::from_tokens(tokens)
-    }
-}
-
-/// Helper function to escape JSON Pointer segments.
-///
-/// This is necessary to escape the characters '~' and '/' in JSON Pointer segments, as per
-/// the JSON Pointer specification evalution:
-/// https://datatracker.ietf.org/doc/html/rfc6901#section-4
-///
-/// ## Arguments
-///
-/// * `segment` - The segment to escape
-///
-/// ## Returns
-///
-/// Returns the escaped segment as a `String`.
-fn escape_json_pointer_segment(segment: &str) -> String {
-    segment.replace('~', "~0").replace('/', "~1")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum PathToken {
-    Key(String),
-    Index(usize),
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Separator {
     Dot,
     Slash,
@@ -509,244 +35,483 @@ pub enum Separator {
 impl Separator {
     pub fn as_char(&self) -> char {
         match self {
-            Separator::Dot => '.',
-            Separator::Slash => '/',
-            Separator::Custom(c) => *c,
+            Self::Dot => '.',
+            Self::Slash => '/',
+            Self::Custom(c) => *c,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Assignment behavior. Full names are case-sensitive and followed by whitespace.
+/// See the crate documentation for the complete operation table and Auto examples.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Operation {
-    /// **Inserts** the parsed structure into the provided JSON object.
-    ///
-    /// Inserts the value into the provided JSON object at the path found during parsing. If the
-    /// path already exists in the JSON object, the existing value at that path will be **overwritten**,
-    /// potentially replacing entire objects or arrays.
-    ///
-    /// Use this function when you want to set or replace a value exactly as specified, disregarding any
-    /// existing data at that path.
-    ///
-    /// ## Arguments
-    ///
-    /// * `json` - The JSON object to insert into
-    ///
-    /// ## Returns
-    ///
-    /// Returns `Ok(())`
-    ///
-    /// ## Examples
-    ///
-    /// ```rust
-    /// use serde_json::Value;
-    /// use jqesque::{Jqesque, Separator};
-    ///
-    /// // Initial JSON object
-    /// let mut json_obj = serde_json::json!({
-    ///     "settings": {
-    ///         "theme": {
-    ///             "color": "red",
-    ///             "font": "Arial",
-    ///             "size": 12
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// // Input string to parse
-    /// let input = "settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-    /// let separator = Separator::Dot;
-    ///
-    /// let jqesque = Jqesque::from_str_with_separator(input, separator).unwrap();
-    /// // Using apply_to with no explicit operator will use the operator "Insert" and this will
-    /// // overwrite the existing "theme" object
-    /// jqesque.apply_to(&mut json_obj);
-    ///
-    /// // The "theme" object is replaced entirely
-    /// let expected = serde_json::json!({
-    ///     "settings": {
-    ///         "theme": {
-    ///             "color": "blue",
-    ///             "font": "Helvetica"
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// assert_eq!(json_obj, expected);
-    ///
-    /// // Note that the "size" key in the original "theme" object is removed
-    /// ```
-    ///
-    /// In this example, `parse_and_insert` replaces the entire `"theme"` object with the new value,
-    /// removing any existing keys not specified in the new value.    
+    /// Create missing containers and overwrite the selected value (`>` / `insert`).
     Insert,
-
-    /// **Merges** the parsed structure into the JSON object.
-    ///
-    /// This function merges the value into the provided JSON object at path found during parsing.
-    /// If the path already exists in the JSON object, the existing value at that path will be **merged**
-    /// with the new value, combining objects and arrays rather than overwriting them.
-    /// Existing keys not specified in the new value are preserved.
-    ///
-    /// Use this function when you want to update or extend the existing data without losing information,
-    /// especially within nested objects or arrays.
-    ///
-    /// ## Arguments
-    ///
-    /// * `json` - The JSON object to merge into
-    ///
-    /// ## Returns
-    ///
-    /// Returns `Ok(())`
-    ///
-    /// ## Examples
-    ///
-    /// ```rust
-    /// use serde_json::Value;
-    /// use jqesque::{Jqesque, Separator};
-    ///
-    /// // Initial JSON object
-    /// let mut json_obj = serde_json::json!({
-    ///     "settings": {
-    ///         "theme": {
-    ///             "color": "red",
-    ///             "font": "Arial",
-    ///             "size": 12
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// // Input string to parse
-    /// let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-    /// let separator = Separator::Dot;
-    ///
-    /// let jqesque = Jqesque::from_str_with_separator(input, separator).unwrap();
-    /// // Prefixing the query with the merge operator (~) will merge the new
-    /// // "theme" object with the existing one
-    /// jqesque.apply_to(&mut json_obj);
-    ///
-    /// // The "theme" object is merged, updating existing keys and preserving others
-    /// let expected = serde_json::json!({
-    ///     "settings": {
-    ///         "theme": {
-    ///             "color": "blue",
-    ///             "font": "Helvetica",
-    ///             "size": 12
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// assert_eq!(json_obj, expected);
-    ///
-    /// // Note that the "size" key in the original "theme" object is preserved
-    /// ```
-    ///
-    /// In this example, `parse_and_merge` updates the `"color"` and `"font"` keys within the `"theme"` object,
-    /// while preserving the `"size"` key that was not specified in the new value.    
+    /// Deep merge objects and arrays by index; null is a value (`~` / `merge`).
     Merge,
+    /// Apply RFC 7396 to the selected value (`merge-patch`): delete null object members,
+    /// replace arrays wholesale. Selecting a nested value is a jqesque extension.
+    MergePatch,
+    /// RFC 6902 add: replace an object member or insert into an existing array (`+` / `add`).
     Add,
+    /// Remove an existing object member or array element (`-` / `remove`).
     Remove,
+    /// Replace an existing value (`=` / `replace`).
     Replace,
+    /// Compare an existing value using RFC 6902 equality (`?` / `test`).
     Test,
-
-    /// **Auto** operation.
-    ///
-    /// The `Auto` operation will attempt the following operations in order:
-    ///
-    /// 1. **Replace**: If the path exists, replace the value.
-    /// 2. **Add**: If the path does not exist, add the value.
-    /// 3. **Insert**: If the path does not exist, insert the value.
-    ///
-    /// This operation is useful when you want to update a value if it exists, or add or insert it if it does not.
+    /// Default: try Replace, then Add, then Insert. Never performs a merge.
     Auto,
 }
 
-impl Display for Operation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let op_str = match self {
-            Operation::Insert => "insert",
-            Operation::Merge => "merge",
-            Operation::Add => "add",
-            Operation::Remove => "remove",
-            Operation::Replace => "replace",
-            Operation::Test => "test",
-            Operation::Auto => "auto",
-        };
-        write!(f, "{}", op_str)
-    }
-}
-
 impl Operation {
-    // Define the operator characters as associated constants
-    const INSERT_OP: char = '>';
-    const MERGE_OP: char = '~';
-    const ADD_OP: char = '+';
-    const REMOVE_OP: char = '-';
-    const REPLACE_OP: char = '=';
-    const TEST_OP: char = '?';
-
-    // Get all valid operators
     pub fn operators() -> &'static [char] {
-        &[
-            Self::INSERT_OP,
-            Self::MERGE_OP,
-            Self::ADD_OP,
-            Self::REMOVE_OP,
-            Self::REPLACE_OP,
-            Self::TEST_OP,
-        ]
+        &['>', '~', '+', '-', '=', '?']
     }
-
-    // Convert from operator character to Operation
     pub fn from_operator(op: char) -> Option<Self> {
-        match op {
-            Self::INSERT_OP => Some(Self::Insert),
-            Self::MERGE_OP => Some(Self::Merge),
-            Self::ADD_OP => Some(Self::Add),
-            Self::REMOVE_OP => Some(Self::Remove),
-            Self::REPLACE_OP => Some(Self::Replace),
-            Self::TEST_OP => Some(Self::Test),
-            _ => None,
-        }
+        Some(match op {
+            '>' => Self::Insert,
+            '~' => Self::Merge,
+            '+' => Self::Add,
+            '-' => Self::Remove,
+            '=' => Self::Replace,
+            '?' => Self::Test,
+            _ => return None,
+        })
     }
-
-    // Get the operator character for this operation
     pub fn to_operator(&self) -> Option<char> {
         match self {
-            Self::Insert => Some(Self::INSERT_OP),
-            Self::Merge => Some(Self::MERGE_OP),
-            Self::Add => Some(Self::ADD_OP),
-            Self::Remove => Some(Self::REMOVE_OP),
-            Self::Replace => Some(Self::REPLACE_OP),
-            Self::Test => Some(Self::TEST_OP),
-            Self::Auto => None,
+            Self::Insert => Some('>'),
+            Self::Merge => Some('~'),
+            Self::Add => Some('+'),
+            Self::Remove => Some('-'),
+            Self::Replace => Some('='),
+            Self::Test => Some('?'),
+            Self::Auto | Self::MergePatch => None,
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "insert" => Self::Insert,
+            "merge" => Self::Merge,
+            "merge-patch" => Self::MergePatch,
+            "add" => Self::Add,
+            "remove" => Self::Remove,
+            "replace" => Self::Replace,
+            "test" => Self::Test,
+            "auto" => Self::Auto,
+            _ => return None,
+        })
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Merge => "merge",
+            Self::MergePatch => "merge-patch",
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Replace => "replace",
+            Self::Test => "test",
+            Self::Auto => "auto",
         }
     }
 }
 
-#[derive(Error, Debug, PartialEq)]
-pub enum JqesqueError {
-    #[error("Parsing error: {0}")]
-    NomError(String),
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
-    #[error("Operation {0} requires a value")]
-    MissingValueError(Operation),
+#[derive(Debug, Clone, PartialEq)]
+enum ValueOperation {
+    Insert,
+    Merge,
+    MergePatch,
+    Add,
+    Replace,
+    Test,
+    Auto,
+}
 
-    #[error("JSON Patch error: {0}")]
-    PatchError(String), // Store the error message as a string, json_patch::PatchError does not implement PartialEq
+impl ValueOperation {
+    fn operation(&self) -> Operation {
+        match self {
+            Self::Insert => Operation::Insert,
+            Self::Merge => Operation::Merge,
+            Self::MergePatch => Operation::MergePatch,
+            Self::Add => Operation::Add,
+            Self::Replace => Operation::Replace,
+            Self::Test => Operation::Test,
+            Self::Auto => Operation::Auto,
+        }
+    }
+}
 
-    #[error("Test failed: expected {expected} but found {actual}")]
-    TestFailedError { expected: Value, actual: Value },
+impl TryFrom<Operation> for ValueOperation {
+    type Error = JqesqueError;
+    fn try_from(operation: Operation) -> Result<Self, Self::Error> {
+        Ok(match operation {
+            Operation::Insert => Self::Insert,
+            Operation::Merge => Self::Merge,
+            Operation::MergePatch => Self::MergePatch,
+            Operation::Add => Self::Add,
+            Operation::Replace => Self::Replace,
+            Operation::Test => Self::Test,
+            Operation::Auto => Self::Auto,
+            Operation::Remove => return Err(JqesqueError::UnexpectedValueError(operation)),
+        })
+    }
+}
 
-    #[error("Failed to access path: {0}")]
-    InvalidPathError(String),
-
-    #[error("Invalid JSON value in strict mode: {0}")]
-    InvalidJsonValueError(String),
-
-    #[error("Limit exceeded for {kind}: limit={limit}, found={found}")]
-    LimitExceededError {
-        kind: &'static str,
-        limit: usize,
-        found: usize,
+#[derive(Debug, Clone, PartialEq)]
+enum Action {
+    Remove,
+    WithValue {
+        operation: ValueOperation,
+        value: ValidatedValue,
     },
+}
+
+/// A validated assignment. Construction and deserialization enforce the same invariants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Jqesque {
+    path: Path,
+    action: Action,
+}
+
+impl Serialize for Jqesque {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state =
+            serializer.serialize_struct("Jqesque", if self.value().is_some() { 3 } else { 2 })?;
+        state.serialize_field("tokens", self.tokens())?;
+        if let Some(value) = self.value() {
+            state.serialize_field("value", value)?;
+        }
+        state.serialize_field("operation", &self.operation())?;
+        state.end()
+    }
+}
+
+fn present_value<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ValidatedValue>, D::Error> {
+    ValidatedValue::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for Jqesque {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            tokens: Path,
+            #[serde(default, deserialize_with = "present_value")]
+            value: Option<ValidatedValue>,
+            operation: Operation,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        // Accept the legacy Remove encoding, which always emitted value:null.
+        let value = if fields.operation == Operation::Remove
+            && fields
+                .value
+                .as_ref()
+                .is_some_and(|value| value.value.is_null())
+        {
+            None
+        } else {
+            fields.value
+        };
+        Self::from_validated(fields.tokens, value, fields.operation)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for Jqesque {
+    type Err = JqesqueError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::from_str_with_options(input, ParseOptions::default())
+    }
+}
+
+impl Jqesque {
+    pub fn new(
+        tokens: Vec<PathToken>,
+        value: Option<Value>,
+        operation: Operation,
+    ) -> Result<Self, JqesqueError> {
+        match Path::new(tokens) {
+            Ok(path) => Self::from_path(path, value, operation),
+            Err(error) => {
+                if let Some(value) = value {
+                    discard(value);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Reuse a validated path without reconstructing its proof from raw tokens.
+    pub fn from_path(
+        path: Path,
+        value: Option<Value>,
+        operation: Operation,
+    ) -> Result<Self, JqesqueError> {
+        Self::from_validated(path, value.map(ValidatedValue::new).transpose()?, operation)
+    }
+
+    pub(crate) fn from_validated(
+        path: Path,
+        value: Option<ValidatedValue>,
+        operation: Operation,
+    ) -> Result<Self, JqesqueError> {
+        check_limit(
+            LimitKind::ValueBytes,
+            path.key_bytes()
+                .saturating_add(value.as_ref().map_or(0, |value| value.bytes)),
+            DEFAULT_MAX_INPUT_BYTES,
+        )?;
+        let action = match (operation, value) {
+            (Operation::Remove, None) => Action::Remove,
+            (Operation::Remove, Some(_)) => {
+                return Err(JqesqueError::UnexpectedValueError(operation))
+            }
+            (_, None) => return Err(JqesqueError::MissingValueError(operation)),
+            (operation, Some(value)) => Action::WithValue {
+                operation: operation.try_into()?,
+                value,
+            },
+        };
+        Ok(Self { path, action })
+    }
+
+    pub fn from_str_with_separator(
+        input: &str,
+        separator: Separator,
+    ) -> Result<Self, JqesqueError> {
+        Self::from_str_with_options(input, ParseOptions::new(separator))
+    }
+    pub fn from_str_with_options(input: &str, options: ParseOptions) -> Result<Self, JqesqueError> {
+        parse_input_with_options(input, options)
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn tokens(&self) -> &[PathToken] {
+        self.path.tokens()
+    }
+    pub fn value(&self) -> Option<&Value> {
+        match &self.action {
+            Action::Remove => None,
+            Action::WithValue { value, .. } => Some(&value.value),
+        }
+    }
+    pub fn operation(&self) -> Operation {
+        match &self.action {
+            Action::Remove => Operation::Remove,
+            Action::WithValue { operation, .. } => operation.operation(),
+        }
+    }
+
+    /// Inspect an assignment as JSON, for example in snapshots or a visual preview.
+    ///
+    /// Insert and Merge return a document fragment. Add, Remove, Replace and Test return
+    /// a one-operation JSON Patch array. Auto returns three candidates, in order:
+    /// `[replace_patch_array, add_patch_array, insert_fragment]`. These are alternatives;
+    /// the target document determines which operation `apply_to` chooses.
+    ///
+    /// MergePatch returns a jqesque descriptor with `op: "merge-patch"`, a JSON Pointer
+    /// `path`, and the unmodified patch `value`. This descriptor is not an RFC patch.
+    ///
+    /// This method preserves the existing preview formats, including Auto's nested arrays.
+    /// It does not apply the assignment or predict the resulting document. Use
+    /// [`Self::to_document`] or [`Self::to_json_patch`] for an explicit conversion, and Serde
+    /// to store and restore an assignment's intent.
+    ///
+    /// Preview allocation is bounded by the validated path and payload limits. It does
+    /// not use the application array budget: Auto includes three copies of the payload
+    /// and one materialized path, so its preview can exceed that budget.
+    pub fn as_json(&self) -> Value {
+        match self.operation() {
+            Operation::Insert | Operation::Merge => self.document_preview(),
+            Operation::Auto => Value::Array(vec![
+                Value::Array(vec![self.operation_preview(Operation::Replace)]),
+                Value::Array(vec![self.operation_preview(Operation::Add)]),
+                self.document_preview(),
+            ]),
+            Operation::MergePatch => self.operation_preview(Operation::MergePatch),
+            operation => Value::Array(vec![self.operation_preview(operation)]),
+        }
+    }
+
+    fn document_preview(&self) -> Value {
+        let mut document = Value::Null;
+        // Path bounds cumulative sparse allocation; ValidatedValue bounds the payload.
+        // Previewing does not spend an application budget or depend on a target document.
+        apply_at_path(
+            &mut document,
+            &self.path,
+            self.value().unwrap_or(&Value::Null),
+            Operation::Insert,
+        );
+        document
+    }
+
+    fn operation_preview(&self, operation: Operation) -> Value {
+        let mut preview = json!({"op": operation.name(), "path": self.path.to_json_pointer()});
+        if let Some(value) = self.value() {
+            preview["value"] = value.clone();
+        }
+        preview
+    }
+
+    /// Materialize an Insert or deep Merge assignment as a document fragment.
+    /// This fragment is data, not an RFC 7396 patch. Applying it with an unrelated merge
+    /// implementation need not reproduce `apply_to`, particularly for indexed paths.
+    pub fn to_document(&self) -> Result<Value, JqesqueError> {
+        if !matches!(self.operation(), Operation::Insert | Operation::Merge) {
+            return Err(JqesqueError::UnsupportedConversion(self.operation()));
+        }
+        let mut value = Value::Null;
+        let mut budget = ApplyBudget::new(ApplyOptions::default());
+        self.apply_operation(&mut value, Operation::Insert, &mut budget)?;
+        Ok(value)
+    }
+
+    /// Export Add, Remove, Replace or Test as an RFC 6902 patch array.
+    /// Auto requires a target document and has no target-independent patch representation.
+    pub fn to_json_patch(&self) -> Result<Value, JqesqueError> {
+        let operation = self.operation();
+        if !matches!(
+            operation,
+            Operation::Add | Operation::Remove | Operation::Replace | Operation::Test
+        ) {
+            return Err(JqesqueError::UnsupportedConversion(operation));
+        }
+        Ok(Value::Array(vec![self.operation_preview(operation)]))
+    }
+
+    /// Apply one assignment. Errors leave the document unchanged.
+    /// Returns the concrete operation chosen, including Auto's selected fallback.
+    pub fn apply_to(&self, document: &mut Value) -> Result<Operation, JqesqueError> {
+        self.apply_to_with_options(document, ApplyOptions::default())
+    }
+
+    pub fn apply_to_with_options(
+        &self,
+        document: &mut Value,
+        options: ApplyOptions,
+    ) -> Result<Operation, JqesqueError> {
+        self.apply_with_budget(document, &mut ApplyBudget::new(options))
+    }
+
+    pub(crate) fn apply_with_budget(
+        &self,
+        document: &mut Value,
+        budget: &mut ApplyBudget,
+    ) -> Result<Operation, JqesqueError> {
+        let operation = if self.operation() == Operation::Auto {
+            if check_patch_path(document, &self.path, Operation::Replace).is_ok() {
+                Operation::Replace
+            } else if check_patch_path(document, &self.path, Operation::Add).is_ok() {
+                Operation::Add
+            } else {
+                Operation::Insert
+            }
+        } else {
+            self.operation()
+        };
+        self.apply_operation(document, operation, budget)?;
+        Ok(operation)
+    }
+
+    fn apply_operation(
+        &self,
+        document: &mut Value,
+        operation: Operation,
+        budget: &mut ApplyBudget,
+    ) -> Result<(), JqesqueError> {
+        let value = self.value().unwrap_or(&Value::Null);
+        if operation == Operation::Test {
+            let actual = resolve(document, &self.path)?;
+            return if numeric_json_eq(actual, value) {
+                Ok(())
+            } else {
+                check_clone(actual)?;
+                Err(JqesqueError::TestFailedError {
+                    expected: value.clone(),
+                    actual: actual.clone(),
+                })
+            };
+        }
+        let payload_slots = match &self.action {
+            Action::Remove => 0,
+            Action::WithValue { value, .. } => value.array_slots,
+        };
+        if matches!(
+            operation,
+            Operation::Insert | Operation::Merge | Operation::MergePatch
+        ) {
+            let growth = path_array_growth(document, &self.path);
+            budget.spend(growth.saturating_add(payload_slots))?;
+            apply_at_path(document, &self.path, value, operation);
+            return Ok(());
+        }
+        let prepared = prepare_patch(document, &self.path, operation)?;
+        budget.spend(prepared.array_slots().saturating_add(payload_slots))?;
+        prepared.apply(value);
+        Ok(())
+    }
+
+    pub(super) fn payload_nodes(&self) -> usize {
+        match &self.action {
+            Action::Remove => 0,
+            Action::WithValue { value, .. } => value.nodes,
+        }
+    }
+
+    pub(super) fn payload_bytes(&self) -> usize {
+        self.path.key_bytes().saturating_add(match &self.action {
+            Action::Remove => 0,
+            Action::WithValue { value, .. } => value.bytes,
+        })
+    }
+
+    /// Check tighter path limits for a caller's policy; global facts remain established by `Path`.
+    pub fn validate_limits(
+        &self,
+        max_path_depth: usize,
+        max_array_index: usize,
+    ) -> Result<(), JqesqueError> {
+        check_limit(LimitKind::PathDepth, self.tokens().len(), max_path_depth)?;
+        for token in self.tokens() {
+            if let PathToken::Index(index) = token {
+                check_limit(LimitKind::ArrayIndex, *index, max_array_index)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct ApplyBudget {
+    remaining: usize,
+    limit: usize,
+}
+impl ApplyBudget {
+    fn new(options: ApplyOptions) -> Self {
+        Self {
+            remaining: options.max_array_slots_limit(),
+            limit: options.max_array_slots_limit(),
+        }
+    }
+    fn spend(&mut self, slots: usize) -> Result<(), JqesqueError> {
+        check_limit(
+            LimitKind::ArraySlots,
+            self.limit
+                .saturating_sub(self.remaining)
+                .saturating_add(slots),
+            self.limit,
+        )?;
+        self.remaining -= slots;
+        Ok(())
+    }
 }

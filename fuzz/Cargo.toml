@@ -13,6 +13,7 @@ serde_json = "1"
 
 [dependencies.jqesque]
 path = ".."
+features = ["arbitrary-precision"]
 
 [[bin]]
 name = "parse_apply"

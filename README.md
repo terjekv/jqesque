@@ -1,314 +1,248 @@
 # jqesque
 
-A Rust library to parse simplified JSON assignments in a jq-like syntax and convert them into JSON structures.
+A Rust library for applying small, readable JSON assignments. Use it for configuration overrides,
+CLI arguments, and programmatic JSON updates.
 
-Sometimes you want to express simplified JSON assignments as strings without writing the full JSON syntax. This library
-borrows syntax from [jq](https://jqlang.github.io/jq/) and JSONPath to create a simplified way to represent JSON
-assignments.
+```rust
+use jqesque::{Jqesque, Operation};
+use serde_json::json;
 
-## Features
+let mut document = json!({"settings": {"theme": "light"}});
+let assignment: Jqesque = "settings.theme=dark".parse().unwrap();
+assert_eq!(assignment.apply_to(&mut document).unwrap(), Operation::Replace);
+assert_eq!(document, json!({"settings": {"theme": "dark"}}));
+```
 
-- **Nested Objects:** Supports nested objects (e.g., `foo.bar.baz=true`).
-- **Arrays with Indices:** Supports arrays with indices (e.g., `foo[0].bar=zoot`, where the index must be a positive
-  number).
-- **Boolean, Number, and Null Values:** Automatically parses values as booleans, numbers, or null if possible. By
-  default, the value is a string unless serde can parse it as a boolean, number, or null.
-- **Custom Separators:** Scopes can be separated by `Separator::Dot` (`.`), `Separator::Slash` (`/`), or
-  `Separator::Custom(char)` (custom character).
-
-Values can be anything that serde_json can parse, including strings, numbers, booleans, null, objects, and arrays.
+Rust **1.85 or newer** is required for the library. Development checks use current stable Rust;
+fuzzing uses nightly. Enable the optional `arbitrary-precision` feature to preserve decimal JSON numbers beyond
+64-bit precision. The integration surfaces are crate-owned types, Serde, and `serde_json::Value`.
 
 ## Syntax
 
-The syntax is inspired by [jq](https://jqlang.github.io/jq/) and JSONPath
-[RFC9535](https://datatracker.ietf.org/doc/html/rfc9535) and is as follows:
+An assignment is an optional operator, a path, `=`, and a value. Remove has no `=` or value.
+You can use either a shorthand or a lowercase operation name followed by spaces or tabs:
 
 ```text
-[<operation>]<path>=[<value>]
+settings.theme=dark
+insert settings.theme="dark"
+>settings.theme="dark"
+merge settings={"font":"mono"}
+~settings={"font":"mono"}
+remove settings.obsolete
+-settings.obsolete
+merge-patch settings={"obsolete":null}
 ```
 
-- `<operation>`: An optional operation to perform. Supported operations are Add (+), Replace (=), Remove (-), Test (?),
-  Insert (>), and Merge (~).
-- `<path>`: The path to the JSON key. The path can be nested and can include array indices. The path can be separated by
-  a dot (`.`), a slash (`/`), or a custom character.
-- `<value>`: A JSON value. Note that the Remove operation does not require a value.
+Full names are `auto`, `insert`, `merge`, `merge-patch`, `add`, `remove`, `replace`, and `test`.
+Names are case-sensitive. `insert=1` still assigns to a key named `insert`.
 
-### Operations
+Paths use dot separators by default: `items[0].name`. Slash and custom separators are available through
+`ParseOptions`. Quoted keys follow JSON string rules, including empty keys, escaped quotes, Unicode escapes,
+and literal separators: `"a.b".""=1`. Indices in brackets are nonnegative integers.
+The path `.` selects the whole document; `"."` selects a key literally named `.`.
 
-Add, Remove, Replace, and Test operations are done as per the JSON Patch specification in
-[RFC6902](https://datatracker.ietf.org/doc/html/rfc6902/).
+## What happens without an operator?
 
-- **Add (+):** Adds a value to an object or inserts it into an array. In the case of an array, the value is inserted
-  before the given index. The - character can be used instead of an index to insert at the end of an array.
-- **Remove (-):** Removes the key or element from the JSON structure.
-- **Replace (=):** Replaces the value of an existing key. If the key does not exist, the operation fails. Equivalent to
-  a “remove” followed by an “add”.
-- **Test (?):** Tests if the key-value pair exists in the JSON structure.
-- **Insert (>):** Inserts a new key-value pair into the JSON structure. If the key already exists, the operation
-  overwrites the value.
-- **Merge (~):** Preforms a deep merge of the value into the existing JSON structure. null values are preserved in the
-  existing structure. Note that this behavior **differs** from from JSON Merge Patch defined in
-  [RFC7396](https://datatracker.ietf.org/doc/html/rfc7396).
+**No operator means Auto. Auto never merges.** It selects the first applicable operation:
 
-For more information, see the Operation enum itself.
-
-### Paths
-
-Paths can be nested and can include array indices. The path can be separated by a dot (`.`), a slash (`/`), or a custom
-character.
-
-### Values
-
-Values are parsed by serde_json. The library will attempt to parse the value as a JSON value, defaulting to string.
-
-## Safety and ParseOptions
-
-When parsing untrusted input (e.g. from HTTP requests, CLI arguments, or config files), use
-`ParseOptions` to bound resource usage and enforce strict value parsing.
-
-- `strict_json_values(true)`: require the right-hand side to be valid JSON.
-- `max_path_depth(n)`: reject deeply nested paths during tokenization, before decoding the value.
-  Each key and bracketed index counts as one token. At the first excess token, parsing returns `LimitExceededError`
-  with `found` equal to `limit + 1`, without checking the remaining path syntax or value.
-- `max_array_index(n)`: reject oversized array indices.
-
-The default limits are exported as `DEFAULT_MAX_PATH_DEPTH` and `DEFAULT_MAX_ARRAY_INDEX`.
-They also act as global safety ceilings for construction, parsing, and deserialization.
-Custom options can tighten these limits; larger settings do not raise the ceilings.
-
-### API selection guide
-
-| API | Best for | Notes |
-| --- | --- | --- |
-| `input.parse::<Jqesque>()` | Quick defaults with dot separator | Uses permissive value parsing and default limits. |
-| `Jqesque::from_str_with_separator(input, separator)` | Convenience with custom separator | Prefer for trusted/simple input. |
-| `Jqesque::from_str_with_options(input, options)` | Untrusted input and production boundaries | Recommended: supports strict parsing and custom limits. |
-
-### Recommended setup for untrusted input
+1. **Replace** when the complete path exists. The selected value is overwritten, including objects and arrays.
+2. **Add** when the parent exists and accepts the final key or index. Array index `len` appends.
+3. **Insert** otherwise. Missing containers are created, incompatible intermediate values are replaced,
+   and sparse arrays are padded with nulls.
 
 ```rust
-use jqesque::{Jqesque, ParseOptions, Separator};
-
-let options = ParseOptions::new(Separator::Dot)
-    .strict_json_values(true)
-    .max_path_depth(64)
-    .max_array_index(10_000);
-
-let jqesque = Jqesque::from_str_with_options("settings.theme=\"dark\"", options)?;
-```
-
-If you prefer permissive parsing (legacy behavior), keep `strict_json_values(false)`.
-
-## Upgrading from 0.0.3 to 0.1.0
-
-This release includes breaking changes to construction, accepted paths, and error handling:
-
-- Replace `Jqesque` struct literals with the fallible `Jqesque::new` constructor. Read fields through
-  `tokens()`, `value()`, and `operation()`. To modify an assignment, construct a new validated value.
-- Paths are limited to 128 tokens and array indices to 1,000,000, including when deserializing stored assignments.
-  Split deeper paths or reduce indices before upgrading. `ParseOptions` can tighten these limits but cannot raise them.
-- Update exhaustive matches on `JqesqueError` to handle `InvalidJsonValueError` and `LimitExceededError`.
-  Strict JSON parsing remains opt-in; default value parsing remains permissive.
-
-For direct construction:
-
-```rust
-use jqesque::{Jqesque, Operation, PathToken};
+use jqesque::{Jqesque, Operation};
 use serde_json::json;
 
-let assignment = Jqesque::new(
-    vec![PathToken::Key("enabled".to_owned())],
-    Some(json!(true)),
-    Operation::Insert,
-)?;
-assert_eq!(assignment.value(), &Some(json!(true)));
+let mut document = json!({"settings": {"theme": "light", "font": "mono"}});
+let assignment: Jqesque = "settings={\"theme\":\"dark\"}".parse().unwrap();
+assert_eq!(assignment.apply_to(&mut document).unwrap(), Operation::Replace);
+assert_eq!(document, json!({"settings": {"theme": "dark"}}));
+// The old font is gone. Use "merge settings=..." to keep it.
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
+The return value reports the concrete operation performed. Resource-limit failures are returned to the caller;
+they do not trigger another Auto fallback.
 
-## Examples
+## Operations
 
-### Basic Usage
+| Name | Shorthand | Existing target | Missing target or parent |
+| --- | --- | --- | --- |
+| `auto` | none | Replace the selected value | Add if possible, otherwise Insert |
+| `insert` | `>` | Overwrite the selected value | Create containers and pad sparse arrays |
+| `merge` | `~` | Deep merge objects and arrays by index | Create containers and pad sparse arrays |
+| `merge-patch` | name only | Apply RFC 7396 to the selected value | Create containers, then apply RFC 7396 |
+| `add` | `+` | Overwrite an object member; insert before an array element | Parent must exist; array index may equal its length |
+| `replace` | `=` | Overwrite the selected value | Error |
+| `remove` | `-` | Delete the member or element; shift later array elements left | Error |
+| `test` | `?` | Compare without mutation | Error |
+
+Add, Replace, Remove, and Test use [JSON Patch semantics (RFC 6902)](https://www.rfc-editor.org/rfc/rfc6902).
+Remove requires a member or element; removing the whole document is rejected. To set the whole document to null,
+use `replace .=null`. Append with `add items.-=value` or, using a slash separator, `add items/-=value`.
+Bracket syntax `[-]` is not accepted.
+
+## Deep merge and JSON Merge Patch
+
+`merge` / `~` is jqesque's deep merge. `merge-patch` explicitly selects
+[JSON Merge Patch (RFC 7396)](https://www.rfc-editor.org/rfc/rfc7396).
+
+| Incoming data | `merge` / `~` | `merge-patch` |
+| --- | --- | --- |
+| Object | Recursively merge members | Recursively merge members |
+| Null object member | Store null as a value | Delete that member |
+| Array | Merge by index and preserve the existing tail | Replace the entire array |
+| Scalar, or null as the selected value | Replace the selected value | Replace the selected value |
+| Object applied to a scalar | Replace with the object, keeping its null members | Start an empty object and apply deletion rules |
+
+For `merge-patch settings=null`, the selected `settings` value becomes null. To delete the `settings` member,
+use `remove settings` or `merge-patch .={"settings":null}`. Selecting a nested value with a path is a jqesque extension;
+RFC 7396 itself operates on an entire document.
 
 ```rust
 use jqesque::Jqesque;
 use serde_json::json;
 
-fn main() {
-    let input = ">foo.bar[0].baz=\"hello\"";
-    let jqesque = input.parse::<Jqesque>().unwrap();
-    // Without using turbofish syntax:
-    // let jqesque: Jqesque = input.parse().unwrap();
-
-    // Recommended for untrusted input:
-    // let options = ParseOptions::new(Separator::Dot)
-    //     .strict_json_values(true)
-    //     .max_path_depth(64)
-    //     .max_array_index(10_000);
-    // let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
-
-    let json_output = jqesque.as_json();
-    assert_eq!(json_output, json!({
-        "foo": {
-            "bar": [
-                {
-                    "baz": "hello"
-                }
-            ]
-        }
-    }));
-}
+let original = json!({"settings": {"old": true, "items": [1, 2]}});
+let mut deep = original.clone();
+let mut rfc = original;
+"merge settings={\"old\":null,\"items\":[9]}"
+    .parse::<Jqesque>().unwrap().apply_to(&mut deep).unwrap();
+"merge-patch settings={\"old\":null,\"items\":[9]}"
+    .parse::<Jqesque>().unwrap().apply_to(&mut rfc).unwrap();
+assert_eq!(deep, json!({"settings": {"old": null, "items": [9, 2]}}));
+assert_eq!(rfc, json!({"settings": {"items": [9]}}));
 ```
 
-### Specifying the separator
+An indexed deep merge such as `merge items[2].enabled=true` changes only that selected element.
+Existing elements at indices 0 and 1 are preserved.
+
+## Parsing untrusted input
+
+Permissive parsing tries JSON first and falls back to a string. Thus `enabled=true` contains a boolean,
+`enabled="true"` contains a string, and `enabled=tru` contains the string `tru`.
+Use strict mode to reject malformed JSON values. Empty strings must be quoted: `name=""`.
 
 ```rust
-use jqesque::{Jqesque, ParseOptions, Separator};
+use jqesque::{ApplyOptions, Jqesque, ParseOptions, Separator};
 use serde_json::json;
 
-fn main() {
-    let input = ">foo/bar[0]/baz=true";
-    let options = ParseOptions::new(Separator::Slash)
-        .strict_json_values(true)
-        .max_path_depth(64)
-        .max_array_index(10_000);
-    let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
-
-    let json_output = jqesque.as_json();
-    assert_eq!(json_output, json!({
-        "foo": {
-            "bar": [
-                {
-                    "baz": true
-                }
-            ]
-        }
-    }));
-}
-```
-
-### Inserting into an existing JSON structure
-
-```rust
-use serde_json::json;
-use jqesque::{Jqesque, ParseOptions, Separator};
-
-let mut json_obj = json!({
-    "settings": {
-        "theme": {
-            "color": "red",
-            "font": "Arial",
-            "size": 12
-        }
-    }
-});
-
-let input = ">settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
 let options = ParseOptions::new(Separator::Dot)
     .strict_json_values(true)
-    .max_path_depth(64)
-    .max_array_index(10_000);
-let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
-
-jqesque.apply_to(&mut json_obj);
-
-let expected = json!({
-    "settings": {
-        "theme": {
-            "color": "blue",
-            "font": "Helvetica"
-        }
-    }
-});
-
-assert_eq!(json_obj, expected);
-// Note that the "size" key in the original "theme" object is removed.
+    .max_input_bytes(16_384)
+    .max_path_depth(32)
+    .max_array_index(1_024);
+let assignment = Jqesque::from_str_with_options("items[2]=true", options).unwrap();
+let mut document = json!({});
+assignment.apply_to_with_options(
+    &mut document,
+    ApplyOptions::new().max_array_slots(4_096),
+).unwrap();
 ```
 
-### Merging into an existing JSON structure
+Limits have exported global ceilings. Setters tighten them and accessors report effective limits:
+
+| Resource | Default / global ceiling | When checked |
+| --- | --- | --- |
+| Assignment input bytes | 1,048,576 | Before tokenization; also the aggregate input ceiling for a batch |
+| Path tokens | 128 | During tokenization, before value decoding |
+| Bracketed array index | 1,000,000 | During tokenization, before value decoding |
+| Potential array slots along a path | 1,000,001 | Path construction and tokenization |
+| Payload depth | 128 edges from the value root | Assignment construction |
+| Payload nodes | 1,000,000 | Construction and incremental deserialization; shared across a batch |
+| Decoded path/payload data bytes | 1,048,576 | Construction and incremental deserialization; shared across a batch |
+| Atomic/Test diagnostic document depth | 256 edges | Before cloning caller-owned content |
+| Application array slots | 1,000,001 | Before mutation; shared across a batch |
+| Batch length | 1,024 assignments | Construction and parsing |
+
+Application budgets conservatively count newly created path array slots plus array slots in copied payloads.
+They bound this work, rather than measuring every allocator byte. They do not count the caller's existing document,
+including atomic batch clones and Test failure diagnostics. Decoded data counts path/object keys, strings, and number
+representations; it is not serialized JSON size. A caller or deserializer may already have allocated input before
+validation. See the [design guide](docs/design.md) for boundaries.
+
+Errors expose crate-owned kinds. Syntax errors include a zero-based UTF-8 byte offset and one-based line and
+character column. Path errors identify the JSON Pointer and zero-based token index. Strict JSON errors retain a
+parser message and a location in the complete assignment.
+
+## Programmatic construction and serialization
+
+`Path` validates raw tokens once and can be reused with `Jqesque::from_path`. Its fields are private.
+`Jqesque::new` remains a convenience constructor taking raw tokens, an optional value, and an operation.
+Every operation except Remove requires a value; use `Some(Value::Null)` for an explicit null.
+
+`Jqesque` serializes with `tokens`, `operation`, and a `value` member for value-bearing operations.
+Remove omits `value`; the legacy Remove encoding with `value:null` is still accepted.
+Deserialization uses the same operation/value and path validation as construction. Assignments compare values using
+JSON numerical equality. Serde can normalize a number's spelling, such as a large integer into equivalent scientific
+notation; round trips preserve its numerical meaning rather than its original text.
+
+`as_json() -> Value` is available for visual inspection, debugging, and snapshot tests. Its existing preview
+formats are preserved:
+
+| Operation | Preview |
+| --- | --- |
+| Insert / Merge | A nested JSON fragment, with null padding for sparse array paths |
+| Add / Remove / Replace / Test | A one-operation JSON Patch array |
+| Auto | `[replace_patch_array, add_patch_array, insert_fragment]`, in fallback order |
+| MergePatch | A jqesque descriptor: `{"op":"merge-patch","path":"/target","value":...}` |
+
+Auto's entries are alternative candidates. The preview does not choose an operation or predict the result on a
+document. MergePatch preserves the raw patch, including deletion markers, in its descriptor; the descriptor itself
+is not an RFC 7396 patch or a JSON Patch operation.
 
 ```rust
+use jqesque::Jqesque;
 use serde_json::json;
-use jqesque::{Jqesque, ParseOptions, Separator};
 
-let mut json_obj = json!({
-    "settings": {
-        "theme": {
-            "color": "red",
-            "font": "Arial",
-            "size": 12
-        }
-    }
-});
-
-let input = "~settings.theme={\"color\":\"blue\",\"font\":\"Helvetica\"}";
-let options = ParseOptions::new(Separator::Dot)
-    .strict_json_values(true)
-    .max_path_depth(64)
-    .max_array_index(10_000);
-let jqesque = Jqesque::from_str_with_options(input, options).unwrap();
-
-jqesque.apply_to(&mut json_obj);
-
-let expected = json!({
-    "settings": {
-        "theme": {
-            "color": "blue",
-            "font": "Helvetica",
-            "size": 12
-        }
-    }
-});
-
-assert_eq!(json_obj, expected);
-// Note that the "size" key in the original "theme" object is preserved.
+let assignment: Jqesque = "settings.theme=dark".parse().unwrap();
+assert_eq!(assignment.as_json(), json!([
+    [{"op":"replace","path":"/settings/theme","value":"dark"}],
+    [{"op":"add","path":"/settings/theme","value":"dark"}],
+    {"settings":{"theme":"dark"}}
+]));
 ```
 
-## Contributing
+Preview allocation is bounded by the validated path and payload limits. It does not spend an application budget;
+Auto's three payload copies and materialized path can exceed the application array-slot limit.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for local quality checks, dependency/security checks,
-and fuzzing commands.
+There are also two explicit conversions:
 
-## Benchmarking
+- `to_document()` materializes Insert or deep Merge as a JSON fragment. This is data, not an RFC merge patch.
+  For indexed paths, merging the fragment elsewhere may not reproduce `apply_to`.
+- `to_json_patch()` exports Add, Remove, Replace, or Test as an RFC 6902 patch array.
 
-Benchmarks are split into small, file-scoped targets in `benches/` to improve fan-out and
-parallel CI execution.
+Unsupported conversions return an error. Auto needs a target document to choose its operation and cannot be exported
+as a target-independent JSON Patch. Serialize an assignment with Serde when you want to store and restore its intent.
 
-- `benches/parse_scalar_small_callgrind.rs`
-- `benches/parse_array_medium_callgrind.rs`
-- `benches/parse_deep_path_medium_callgrind.rs`
-- `benches/parse_object_large_callgrind.rs`
-- `benches/insert_object_small_callgrind.rs`
-- `benches/insert_array_sparse_medium_callgrind.rs`
-- `benches/insert_deep_path_medium_callgrind.rs`
-- `benches/insert_array_dense_large_callgrind.rs`
-- `benches/merge_object_small_callgrind.rs`
-- `benches/merge_array_medium_callgrind.rs`
-- `benches/merge_deep_object_large_callgrind.rs`
+## Multiple assignments
 
-Install the runner and run selected benchmark targets:
+`Batch::parse` parses all assignments before application. `apply_to` applies them in order and retains earlier
+successful changes if a later assignment fails. `apply_atomically` commits only after every assignment succeeds.
+Both report the zero-based index and original error for a failed assignment, and share an application budget.
 
-```bash
-cargo install gungraun-runner --version 0.19.4 --locked
-cargo bench --bench parse_scalar_small_callgrind
-cargo bench --bench parse_object_large_callgrind
-cargo bench --bench insert_array_sparse_medium_callgrind
-cargo bench --bench merge_deep_object_large_callgrind
+```rust
+use jqesque::{ApplyOptions, Batch, ParseOptions};
+use serde_json::json;
+
+let batch = Batch::parse(["settings.theme=dark", "?settings.enabled=true"], ParseOptions::default()).unwrap();
+let mut document = json!({"settings": {"theme": "light", "enabled": false}});
+let original = document.clone();
+let error = batch.apply_atomically(&mut document, ApplyOptions::default()).unwrap_err();
+assert_eq!(error.index, 1);
+assert_eq!(document, original);
 ```
 
-PR benchmark reporting and regression gating use the parallel reusable workflow from
-[`terjekv/rust-pr-bench`](https://github.com/terjekv/rust-pr-bench) via `.github/workflows/bench.yml`.
-Benchmark CI caches Cargo dependencies, build outputs, runners, and compatible executables. Pushes to `main`
-warm the build caches; pull requests run fresh base and head measurements with the 3% regression gate.
+## Further documentation
 
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release notes and notable changes.
-
-## Releasing
-
-See the [publishing guide](.github/RELEASING.md) for trusted publisher setup and release instructions.
+- [Operation examples and edge cases](docs/operations.md)
+- [Architecture, guarantees, and limits](docs/design.md)
+- [Migration guide](docs/migration.md)
+- [Correctness, performance, and security review](docs/review.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing, verification, fuzzing, and benchmarks](CONTRIBUTING.md)
+- [Release instructions](.github/RELEASING.md)
 
 ## License
 
-See the [LICENSE](LICENSE) file for details.
+[MIT](LICENSE).

@@ -1,6 +1,6 @@
 #![no_main]
 
-use jqesque::{Jqesque, JqesqueError, ParseOptions, Separator, DEFAULT_MAX_PATH_DEPTH};
+use jqesque::{Jqesque, JqesqueError, LimitKind, ParseOptions, Separator, DEFAULT_MAX_PATH_DEPTH};
 use libfuzzer_sys::fuzz_target;
 use serde_json::json;
 
@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
             assert!(matches!(
                 result,
                 Err(JqesqueError::LimitExceededError {
-                    kind: "path depth",
+                    kind: LimitKind::PathDepth,
                     limit,
                     found,
                 }) if limit == effective_limit && found == effective_limit + 1
@@ -51,13 +51,14 @@ fuzz_target!(|data: &[u8]| {
             assert!(matches!(
                 result,
                 Err(JqesqueError::LimitExceededError {
-                    kind: "array index",
+                    kind: LimitKind::ArrayIndex,
                     ..
                 })
             ));
         } else {
             let parsed = result.expect("generated path is within the configured limits");
             assert_eq!(parsed.tokens().len(), depth + 1);
+            let _ = parsed.as_json();
             let mut json_obj = json!({
                 "seed": [1, 2, 3],
                 "settings": { "theme": "light" }
