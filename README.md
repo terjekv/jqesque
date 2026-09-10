@@ -278,6 +278,10 @@ warm the build caches; pull requests run fresh base and head measurements with t
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes and notable changes.
 
+## Releasing
+
+See the [publishing guide](.github/RELEASING.md) for trusted publisher setup and release instructions.
+
 ## License
 
 See the [LICENSE](LICENSE) file for details.
