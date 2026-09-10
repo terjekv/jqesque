@@ -1,6 +1,6 @@
 #![no_main]
 
-use jqesque::{Jqesque, JqesqueError, ParseOptions, Separator, DEFAULT_MAX_PATH_DEPTH};
+use jqesque::{Jqesque, JqesqueError, LimitKind, ParseOptions, Separator, DEFAULT_MAX_PATH_DEPTH};
 use libfuzzer_sys::fuzz_target;
 use serde_json::json;
 
@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
             assert!(matches!(
                 result,
                 Err(JqesqueError::LimitExceededError {
-                    kind: "path depth",
+                    kind: LimitKind::PathDepth,
                     limit,
                     found,
                 }) if limit == effective_limit && found == effective_limit + 1
@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
             assert!(matches!(
                 result,
                 Err(JqesqueError::LimitExceededError {
-                    kind: "array index",
+                    kind: LimitKind::ArrayIndex,
                     ..
                 })
             ));

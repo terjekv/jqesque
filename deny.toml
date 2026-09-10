@@ -1,5 +1,7 @@
 [advisories]
-# Keep the default advisory-dbs directory separate from cargo-audit's advisory-db.
+# Use a project-local cache: home directories can be on NFS without file locking.
+# Keep it separate from cargo-audit's checkout.
+db-path = "target/security/deny"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
 

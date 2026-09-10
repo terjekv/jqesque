@@ -26,11 +26,17 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+      - name: Test default features
+        run: cargo test --locked
+
       - name: Test
         run: cargo test --all-features --locked
 
       - name: Doc tests
         run: cargo test --doc --all-features --locked
+
+      - name: Fuzz format check
+        run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
       - name: Fuzz target compile check
         run: cargo check --manifest-path fuzz/Cargo.toml --bins
@@ -51,10 +57,35 @@ jobs:
         run: cargo install cargo-deny --locked
 
       - name: Dependency policy check
-        run: cargo deny check advisories bans sources
+        run: |
+          cargo deny check advisories bans sources
+          cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check advisories bans sources
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
       - name: Advisory scan
-        run: cargo audit
+        run: |
+          cargo audit --db target/security/audit
+          cargo audit --file fuzz/Cargo.lock --db target/security/audit
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Check supported library toolchain
+        run: cargo check --lib --all-features --locked
+
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Markdown lint
+        run: npx --yes markdownlint-cli2@0.20.0 --config .markdownlint.json "**/*.md" "!target" "!fuzz/target"

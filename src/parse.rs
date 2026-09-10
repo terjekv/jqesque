@@ -1,243 +1,213 @@
-use crate::types::{
-    Jqesque, JqesqueError, Operation, ParseOptions, PathDepthLimit, PathToken, Separator,
-};
-use nom::{
-    branch::alt,
-    bytes::complete::{escaped, escaped_transform, is_not, take_while1},
-    character::complete::{char, digit1, none_of, one_of},
-    combinator::{all_consuming, map, map_res, opt},
-    error::{ErrorKind, FromExternalError, ParseError},
-    sequence::delimited,
-    IResult, Parser,
-};
-use nom_language::error::VerboseError;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
-type Res<T, U> = IResult<T, U, ParserError<T>>;
+use crate::types::{
+    check_limit, Jqesque, JqesqueError, LimitKind, Operation, ParseOptions, Path, PathBuilder,
+    PathToken, SourceLocation, SyntaxKind, ValidatedValue,
+};
 
-#[derive(Debug)]
-enum ParserError<I> {
-    Syntax(VerboseError<I>),
-    Limit(JqesqueError),
-}
-
-impl<I> ParseError<I> for ParserError<I> {
-    fn from_error_kind(input: I, kind: ErrorKind) -> Self {
-        Self::Syntax(VerboseError::from_error_kind(input, kind))
-    }
-
-    fn append(input: I, kind: ErrorKind, other: Self) -> Self {
-        match other {
-            Self::Syntax(error) => Self::Syntax(VerboseError::append(input, kind, error)),
-            limit => limit,
-        }
-    }
-
-    fn from_char(input: I, c: char) -> Self {
-        Self::Syntax(VerboseError::from_char(input, c))
+fn syntax(input: &str, offset: usize, kind: SyntaxKind) -> JqesqueError {
+    JqesqueError::SyntaxError {
+        kind,
+        location: SourceLocation::at(input, offset),
     }
 }
 
-impl<I, E> FromExternalError<I, E> for ParserError<I> {
-    fn from_external_error(input: I, kind: ErrorKind, error: E) -> Self {
-        Self::Syntax(VerboseError::from_external_error(input, kind, error))
-    }
-}
-
-fn parse_error(error: nom::Err<ParserError<&str>>) -> JqesqueError {
-    match error {
-        nom::Err::Error(ParserError::Limit(error))
-        | nom::Err::Failure(ParserError::Limit(error)) => error,
-        nom::Err::Error(ParserError::Syntax(error)) => {
-            JqesqueError::NomError(nom::Err::Error(error).to_string())
-        }
-        nom::Err::Failure(ParserError::Syntax(error)) => {
-            JqesqueError::NomError(nom::Err::Failure(error).to_string())
-        }
-        nom::Err::Incomplete(needed) => {
-            JqesqueError::NomError(nom::Err::<VerboseError<&str>>::Incomplete(needed).to_string())
-        }
-    }
-}
-
-struct Assignment<'a> {
-    tokens: Vec<PathToken>,
-    value: Option<&'a str>,
-    operation: Operation,
-}
-
-/// Parses the input string into path tokens and a serde_json::Value.
-///
-/// ## Arguments
-///
-/// * `input` - The input string, e.g., "foo.bar[0].baz=true"
-/// * `separator` - The separator to use between keys, a Separator enum variant.
-///
-/// ## Returns
-///
-/// Returns a `Jqesque` structure if successful, or a `JqesqueError` if parsing fails.
-pub fn parse_input(input: &str, separator: Separator) -> Result<Jqesque, JqesqueError> {
-    parse_input_with_options(input, ParseOptions::new(separator))
-}
-
-pub fn parse_input_with_options(
-    input: &str,
-    options: ParseOptions,
-) -> Result<Jqesque, JqesqueError> {
-    let sep_char = options.separator().as_char();
-    let depth_limit = PathDepthLimit::new(options.max_path_depth_limit());
-    let (_, assignment) = all_consuming(|i| jqesque(i, sep_char, depth_limit))
-        .parse(input)
-        .map_err(parse_error)?;
-    let value = assignment
-        .value
-        .map(|value| json_value(value, options.strict_json_values_enabled()))
-        .transpose()?;
-    let jqesque = Jqesque::new(assignment.tokens, value, assignment.operation)?;
-    jqesque.validate_limits(depth_limit.get(), options.max_array_index_limit())?;
-    Ok(jqesque)
-}
-
-fn jqesque(input: &str, separator: char, depth_limit: PathDepthLimit) -> Res<&str, Assignment<'_>> {
-    let (input, operation) = opt(operation_prefix).parse(input)?;
-    let operation = operation.unwrap_or(Operation::Auto);
-
-    let (input, (tokens, value)) = assignment(input, separator, &operation, depth_limit)?;
-
-    Ok((
-        input,
-        Assignment {
-            tokens,
-            value,
-            operation,
-        },
-    ))
-}
-
-fn operation_prefix(input: &str) -> Res<&str, Operation> {
-    let (input, op_char) = one_of(Operation::operators())(input)?;
-    let operation =
-        Operation::from_operator(op_char).expect("operator should be valid since we used one_of");
-    Ok((input, operation))
-}
-
-fn assignment<'a>(
-    input: &'a str,
-    separator: char,
-    operation: &Operation,
-    depth_limit: PathDepthLimit,
-) -> Res<&'a str, (Vec<PathToken>, Option<&'a str>)> {
-    let (input, tokens) = path(input, separator, depth_limit)?;
-
-    let (input, value_opt) = match operation {
-        Operation::Remove => (input, None),
-        _ => {
-            let (input, _) = char('=')(input)?;
-            let (input, _) = opt(char(' ')).parse(input)?;
-            let (input, value) = is_not("")(input)?;
-            (input, Some(value))
-        }
-    };
-
-    Ok((input, (tokens, value_opt)))
-}
-
-fn path(input: &str, separator: char, depth_limit: PathDepthLimit) -> Res<&str, Vec<PathToken>> {
-    let mut tokens = Vec::new();
-    let (mut input, ()) = path_segment(input, &mut tokens, depth_limit)?;
-
-    while let Some(next) = input.strip_prefix(separator) {
-        let previous_depth = tokens.len();
-        match path_segment(next, &mut tokens, depth_limit) {
-            Ok((remaining, ())) => input = remaining,
-            Err(nom::Err::Error(_)) => {
-                // A separator can also belong to the assignment (e.g. custom '=').
-                tokens.truncate(previous_depth);
-                break;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    Ok((input, tokens))
-}
-
-fn path_segment<'a>(
-    mut input: &'a str,
-    tokens: &mut Vec<PathToken>,
-    depth_limit: PathDepthLimit,
-) -> Res<&'a str, ()> {
-    let initial_depth = tokens.len();
-    if input.starts_with('"') || input.chars().next().is_some_and(is_identifier_char) {
-        if let Err(error) = depth_limit.check_next_token(tokens.len()) {
-            // Recognize the excess key without allocating its decoded string. An invalid
-            // key must still allow separator backtracking, e.g. custom '=' with value '"'.
-            alt((
-                delimited(
-                    char('"'),
-                    escaped(none_of("\\\""), '\\', one_of("\\\"nrt")),
-                    char('"'),
-                ),
-                take_while1(is_identifier_char),
-            ))
-            .parse(input)?;
-            return Err(nom::Err::Failure(ParserError::Limit(error)));
-        }
-        let (remaining, key) = alt((quoted_string, valid_identifier)).parse(input)?;
-        tokens.push(PathToken::Key(key));
-        input = remaining;
-    }
-
-    while input.starts_with('[') {
-        match delimited(
-            char('['),
-            map_res(digit1, |s: &str| s.parse::<usize>()),
-            char(']'),
-        )
-        .parse(input)
-        {
-            Ok((remaining, index)) => {
-                depth_limit
-                    .check_next_token(tokens.len())
-                    .map_err(|error| nom::Err::Failure(ParserError::Limit(error)))?;
-                tokens.push(PathToken::Index(index));
-                input = remaining;
-            }
-            Err(nom::Err::Error(_)) => break,
-            Err(error) => return Err(error),
-        }
-    }
-
-    if tokens.len() == initial_depth {
-        return Err(nom::Err::Error(ParserError::from_error_kind(
-            input,
-            ErrorKind::Alt,
-        )));
-    }
-    Ok((input, ()))
-}
-
-fn is_identifier_char(c: char) -> bool {
+fn identifier(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-fn valid_identifier(input: &str) -> Res<&str, String> {
-    map(take_while1(is_identifier_char), |s: &str| s.to_string()).parse(input)
+/// Return the byte length of a JSON quoted key without allocating its decoded form.
+fn quoted_len(input: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (index, byte) in input.bytes().enumerate().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            let length = index + 1;
+            return serde_json::from_str::<IgnoredAny>(&input[..length])
+                .ok()
+                .map(|_| length);
+        }
+    }
+    None
 }
 
-fn quoted_string(input: &str) -> Res<&str, String> {
-    delimited(
-        char('"'),
-        escaped_transform(none_of("\\\""), '\\', one_of("\\\"nrt")),
-        char('"'),
-    )
-    .parse(input)
+pub(crate) fn parse_input_with_options(
+    input: &str,
+    options: ParseOptions,
+) -> Result<Jqesque, JqesqueError> {
+    check_limit(
+        LimitKind::InputBytes,
+        input.len(),
+        options.max_input_bytes_limit(),
+    )?;
+    let (operation, mut offset) = operation(input, options)?;
+    let mut builder = PathBuilder::new(options);
+    let path = if input[offset..].starts_with('.')
+        && matches!(input.as_bytes().get(offset + 1), None | Some(b'='))
+    {
+        offset += 1;
+        Path::root()
+    } else {
+        segment(input, &mut offset, &mut builder, false)?;
+        let separator = options.separator().as_char();
+        while input[offset..].starts_with(separator) {
+            let mut next = offset + separator.len_utf8();
+            // Preserve the legacy custom '=' separator's assignment-delimiter backtracking.
+            if separator == '=' && !segment_starts(&input[next..]) {
+                break;
+            }
+            let before = builder.len();
+            segment(input, &mut next, &mut builder, separator == '=')?;
+            if builder.len() == before {
+                break;
+            }
+            offset = next;
+        }
+        builder.finish()
+    };
+    let value = if operation == Operation::Remove {
+        if offset != input.len() {
+            return Err(syntax(input, offset, SyntaxKind::TrailingInput));
+        }
+        None
+    } else {
+        if input.as_bytes().get(offset) != Some(&b'=') {
+            return Err(syntax(input, offset, SyntaxKind::ExpectedAssignment));
+        }
+        offset += 1;
+        // Keep permissive parsing's historical removal of one optional leading space.
+        if input.as_bytes().get(offset) == Some(&b' ') {
+            offset += 1;
+        }
+        if offset == input.len() {
+            return Err(syntax(input, offset, SyntaxKind::ExpectedValue));
+        }
+        Some(json_value(
+            input,
+            offset,
+            options.strict_json_values_enabled(),
+        )?)
+    };
+    Jqesque::from_validated(path, value, operation)
 }
 
-fn json_value(input: &str, strict_json_values: bool) -> Result<Value, JqesqueError> {
-    match serde_json::from_str(input) {
+fn operation(input: &str, options: ParseOptions) -> Result<(Operation, usize), JqesqueError> {
+    if let Some(op) = input.chars().next().and_then(Operation::from_operator) {
+        return Ok((op, 1));
+    }
+    let name_len = input
+        .chars()
+        .take_while(|c| identifier(*c))
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if name_len > 0
+        && input[name_len..].starts_with([' ', '\t'])
+        && !matches!(options.separator().as_char(), ' ' | '\t')
+    {
+        let operation = Operation::from_name(&input[..name_len])
+            .ok_or_else(|| syntax(input, 0, SyntaxKind::UnknownOperation))?;
+        let offset = input.len() - input[name_len..].trim_start_matches([' ', '\t']).len();
+        Ok((operation, offset))
+    } else {
+        Ok((Operation::Auto, 0))
+    }
+}
+
+fn segment_starts(input: &str) -> bool {
+    if input.starts_with('"') {
+        quoted_len(input).is_some()
+    } else if let Some(rest) = input.strip_prefix('[') {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && rest.as_bytes().get(digits) == Some(&b']')
+    } else {
+        input.chars().next().is_some_and(identifier)
+    }
+}
+
+fn segment(
+    input: &str,
+    offset: &mut usize,
+    builder: &mut PathBuilder,
+    backtrack: bool,
+) -> Result<(), JqesqueError> {
+    let before = builder.len();
+    let rest = &input[*offset..];
+    if rest.starts_with('"') {
+        let Some(length) = quoted_len(rest) else {
+            if backtrack {
+                return Ok(());
+            }
+            return Err(syntax(input, *offset, SyntaxKind::InvalidQuotedKey));
+        };
+        builder.check_next()?;
+        let key = serde_json::from_str::<String>(&rest[..length])
+            .map_err(|_| syntax(input, *offset, SyntaxKind::InvalidQuotedKey))?;
+        builder.push(PathToken::Key(key))?;
+        *offset += length;
+    } else {
+        let length = rest
+            .chars()
+            .take_while(|c| identifier(*c))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if length > 0 {
+            builder.check_next()?;
+            builder.push(PathToken::Key(rest[..length].to_owned()))?;
+            *offset += length;
+        }
+    }
+    while input[*offset..].starts_with('[') {
+        let start = *offset + 1;
+        let length = input[start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if length == 0 || input.as_bytes().get(start + length) != Some(&b']') {
+            if backtrack && builder.len() == before {
+                return Ok(());
+            }
+            return Err(syntax(input, start, SyntaxKind::InvalidArrayIndex));
+        }
+        let index = input[start..start + length]
+            .parse::<usize>()
+            .map_err(|_| syntax(input, start, SyntaxKind::InvalidArrayIndex))?;
+        builder.push(PathToken::Index(index))?;
+        *offset = start + length + 1;
+    }
+    if builder.len() == before {
+        return Err(syntax(input, *offset, SyntaxKind::ExpectedPath));
+    }
+    Ok(())
+}
+
+fn json_value(input: &str, offset: usize, strict: bool) -> Result<ValidatedValue, JqesqueError> {
+    let raw = &input[offset..];
+    match serde_json::from_str(raw) {
         Ok(value) => Ok(value),
-        Err(err) if strict_json_values => Err(JqesqueError::InvalidJsonValueError(err.to_string())),
-        Err(_) => Ok(Value::String(input.to_string())),
+        Err(error) if strict => {
+            // serde_json columns count bytes. Convert to a UTF-8 character location in the whole assignment.
+            let line_start = raw
+                .split_inclusive('\n')
+                .take(error.line().saturating_sub(1))
+                .map(str::len)
+                .sum::<usize>();
+            let mut relative = if error.is_eof() {
+                raw.len()
+            } else {
+                (line_start + error.column().saturating_sub(1)).min(raw.len())
+            };
+            while !raw.is_char_boundary(relative) {
+                relative -= 1;
+            }
+            Err(JqesqueError::InvalidJsonValueError {
+                location: SourceLocation::at(input, offset + relative),
+                message: error.to_string(),
+            })
+        }
+        Err(_) => ValidatedValue::new(Value::String(raw.to_owned())),
     }
 }
