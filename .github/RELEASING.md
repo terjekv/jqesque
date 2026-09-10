@@ -41,11 +41,11 @@ before publishing and revokes it when the job finishes.
    ```
 
 3. Tag that commit with `v` followed by the exact version from `Cargo.toml`, then push only that tag.
-   For example, when releasing version `0.0.4`:
+   For example, when releasing version `0.1.0`:
 
    ```bash
-   git tag -a v0.0.4 -m "Release v0.0.4"
-   git push origin v0.0.4
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push origin v0.1.0
    ```
 
 4. Watch the [publishing workflow](https://github.com/terjekv/jqesque/actions/workflows/publish.yml)

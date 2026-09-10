@@ -99,6 +99,33 @@ let jqesque = Jqesque::from_str_with_options("settings.theme=\"dark\"", options)
 
 If you prefer permissive parsing (legacy behavior), keep `strict_json_values(false)`.
 
+## Upgrading from 0.0.3 to 0.1.0
+
+This release includes breaking changes to construction, accepted paths, and error handling:
+
+- Replace `Jqesque` struct literals with the fallible `Jqesque::new` constructor. Read fields through
+  `tokens()`, `value()`, and `operation()`. To modify an assignment, construct a new validated value.
+- Paths are limited to 128 tokens and array indices to 1,000,000, including when deserializing stored assignments.
+  Split deeper paths or reduce indices before upgrading. `ParseOptions` can tighten these limits but cannot raise them.
+- Update exhaustive matches on `JqesqueError` to handle `InvalidJsonValueError` and `LimitExceededError`.
+  Strict JSON parsing remains opt-in; default value parsing remains permissive.
+
+For direct construction:
+
+```rust
+use jqesque::{Jqesque, Operation, PathToken};
+use serde_json::json;
+
+let assignment = Jqesque::new(
+    vec![PathToken::Key("enabled".to_owned())],
+    Some(json!(true)),
+    Operation::Insert,
+)?;
+assert_eq!(assignment.value(), &Some(json!(true)));
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
+
 ## Examples
 
 ### Basic Usage
