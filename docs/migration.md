@@ -6,9 +6,6 @@ This change intentionally revises public APIs and behavior. It requires a breaki
 
 | Previous usage | Replacement |
 | --- | --- |
-| `assignment.as_json()` for Insert/Merge | `assignment.to_document()?` |
-| `assignment.as_json()` for JSON Patch operations | `assignment.to_json_patch()?` |
-| `assignment.as_json()` for Auto | Apply to a target, or serialize the assignment with Serde |
 | `assignment.value(): &Option<Value>` | `assignment.value(): Option<&Value>` |
 | `assignment.operation(): &Operation` | `assignment.operation(): Operation` |
 | Matches on `NomError`, `PatchError`, `InvalidPathError` | Match `SyntaxError` or structured `PathError` |
@@ -18,6 +15,12 @@ This change intentionally revises public APIs and behavior. It requires a breaki
 `JqesqueError` and error-kind enums are non-exhaustive; downstream matches need a fallback arm.
 Operation adds `MergePatch`; update exhaustive matches. It has no shorthand character.
 `ParseOptions` limit getters now return the effective, ceiling-clamped settings.
+
+`as_json() -> Value` remains supported for previews and snapshot tests, with its existing output shapes.
+Auto still returns `[replace_patch_array, add_patch_array, insert_fragment]`; these are alternatives, not a combined
+executable patch. MergePatch adds an explicit `{"op":"merge-patch","path":...,"value":...}` preview descriptor.
+Use the additional `to_document()?` or `to_json_patch()?` methods when a specific conversion is required.
+Preview allocation uses the validated path and payload bounds independently of application budgets.
 
 ## Construction and serialization
 
@@ -43,7 +46,7 @@ use an array payload such as `merge a=[null,9]` when that is intended. Test acce
 Assignments now enforce input-byte, cumulative path-array, payload-depth/node/data-byte, aggregate batch, and
 application-array limits.
 Reduce or split oversized assignments, choose tighter caller-specific limits where useful, and handle
-`LimitExceededError` from application and conversion. Atomic batches and Test diagnostics also reject caller-owned
+`LimitExceededError` from application and `to_document()`. Atomic batches and Test diagnostics also reject caller-owned
 content deeper than 256 before cloning it. Splitting a batch does not preserve a shared atomic transaction.
 
 The default operation remains Auto. Deep Merge remains `merge` / `~`. RFC 7396 behavior is available only through

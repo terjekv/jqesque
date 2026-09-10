@@ -810,6 +810,103 @@ fn patch_export_has_standard_shape() {
 }
 
 #[rstest]
+#[case(">parent.child=1", json!({"parent":{"child":1}}))]
+#[case("~items[2]=null", json!({"items":[null,null,null]}))]
+#[case("+a=1", json!([{"op":"add","path":"/a","value":1}]))]
+#[case("-a", json!([{"op":"remove","path":"/a"}]))]
+#[case("=a=null", json!([{"op":"replace","path":"/a","value":null}]))]
+#[case("?a=[1,2]", json!([{"op":"test","path":"/a","value":[1,2]}]))]
+#[case("a.b=1", json!([
+    [{"op":"replace","path":"/a/b","value":1}],
+    [{"op":"add","path":"/a/b","value":1}],
+    {"a":{"b":1}}
+]))]
+#[case("auto .=null", json!([
+    [{"op":"replace","path":"","value":null}],
+    [{"op":"add","path":"","value":null}],
+    null
+]))]
+#[case("a[1]=[2]", json!([
+    [{"op":"replace","path":"/a/1","value":[2]}],
+    [{"op":"add","path":"/a/1","value":[2]}],
+    {"a":[null,[2]]}
+]))]
+fn as_json_preserves_preview_formats(#[case] input: &str, #[case] expected: Value) {
+    let assignment: Jqesque = input.parse().unwrap();
+    let preview: Value = assignment.as_json();
+    assert_eq!(preview, expected);
+}
+
+#[rstest]
+#[case(r#"+"a/b~c"=null"#, json!([{"op":"add","path":"/a~1b~0c","value":null}]))]
+#[case(r#">"a/b~c"=null"#, json!({"a/b~c":null}))]
+#[case(r#""a/b~c"=null"#, json!([
+    [{"op":"replace","path":"/a~1b~0c","value":null}],
+    [{"op":"add","path":"/a~1b~0c","value":null}],
+    {"a/b~c":null}
+]))]
+fn as_json_uses_literal_keys_and_correct_pointers(#[case] input: &str, #[case] expected: Value) {
+    assert_eq!(input.parse::<Jqesque>().unwrap().as_json(), expected);
+}
+
+#[rstest]
+#[case("insert a=1", ">a=1")]
+#[case("merge a=1", "~a=1")]
+#[case("add a=1", "+a=1")]
+#[case("remove a", "-a")]
+#[case("replace a=1", "=a=1")]
+#[case("test a=1", "?a=1")]
+#[case("auto a=1", "a=1")]
+fn as_json_named_operations_match_shorthands(#[case] named: &str, #[case] shorthand: &str) {
+    assert_eq!(
+        named.parse::<Jqesque>().unwrap().as_json(),
+        shorthand.parse::<Jqesque>().unwrap().as_json()
+    );
+}
+
+#[rstest]
+#[case("merge-patch a={\"remove\":null,\"keep\":[1]}", json!({
+    "op":"merge-patch","path":"/a","value":{"remove":null,"keep":[1]}
+}))]
+#[case("merge-patch .=null", json!({"op":"merge-patch","path":"","value":null}))]
+#[case(r#"merge-patch "a/b~c"=[1]"#, json!({
+    "op":"merge-patch","path":"/a~1b~0c","value":[1]
+}))]
+fn as_json_merge_patch_preserves_patch_intent(#[case] input: &str, #[case] expected: Value) {
+    assert_eq!(input.parse::<Jqesque>().unwrap().as_json(), expected);
+}
+
+#[rstest]
+#[case(Operation::Insert)]
+#[case(Operation::Auto)]
+fn as_json_can_preview_beyond_the_application_array_budget(#[case] operation: Operation) {
+    let assignment = Jqesque::new(
+        vec![PathToken::Index(DEFAULT_MAX_ARRAY_INDEX)],
+        Some(json!([9])),
+        operation,
+    )
+    .unwrap();
+    let mut document = Value::Null;
+    assert!(matches!(
+        assignment.apply_to(&mut document),
+        Err(JqesqueError::LimitExceededError {
+            kind: LimitKind::ArraySlots,
+            ..
+        })
+    ));
+    let preview = assignment.as_json();
+    let fragment = if operation == Operation::Auto {
+        &preview[2]
+    } else {
+        &preview
+    };
+    let array = fragment.as_array().unwrap();
+    assert_eq!(array.len(), DEFAULT_MAX_ARRAY_INDEX + 1);
+    assert!(array[..DEFAULT_MAX_ARRAY_INDEX].iter().all(Value::is_null));
+    assert_eq!(array[DEFAULT_MAX_ARRAY_INDEX], json!([9]));
+}
+
+#[rstest]
 #[case("bogus a=1", SyntaxKind::UnknownOperation, 0, 1)]
 #[case("a[bad]=1", SyntaxKind::InvalidArrayIndex, 2, 3)]
 #[case("é[bad]=1", SyntaxKind::InvalidArrayIndex, 3, 3)]

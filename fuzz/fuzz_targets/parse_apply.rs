@@ -30,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
                     "settings": { "theme": "light" }
                 });
 
+                let _ = parsed.as_json();
                 let _ = parsed.to_document();
                 let _ = parsed.to_json_patch();
                 let encoded = serde_json::to_value(&parsed).unwrap();

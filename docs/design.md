@@ -54,6 +54,12 @@ Atomic application additionally clones the caller's existing document. These lim
 quota and do not include memory already allocated by the caller or Serde's input buffers. Data-byte budgets include
 path/object keys, strings, and numeric representations, including large arbitrary-precision numbers.
 
+`as_json()` is an infallible inspection API over a validated assignment. Its preview is bounded by the independent
+path and payload proofs, without spending an application budget. Insert/Merge materialize one path and one payload;
+Auto materializes one path and three payload copies, plus the small candidate-array wrappers. This deliberately
+allows previewing an assignment even when its application would exceed the combined array budget. The explicit
+`to_document()` conversion continues to enforce that application budget. Previewing never clones a target document.
+
 Rejected programmatic payloads and replaced document subtrees are disposed of iteratively. Atomic batches and Test
 failure diagnostics check caller-owned content before cloning, rejecting depth above 256. This accepts the maximum
 depth that a 128-token path plus a 128-level payload can create. An atomic preflight failure is reported at index 0.

@@ -58,6 +58,7 @@ fuzz_target!(|data: &[u8]| {
         } else {
             let parsed = result.expect("generated path is within the configured limits");
             assert_eq!(parsed.tokens().len(), depth + 1);
+            let _ = parsed.as_json();
             let mut json_obj = json!({
                 "seed": [1, 2, 3],
                 "settings": { "theme": "light" }

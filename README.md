@@ -177,7 +177,36 @@ Deserialization uses the same operation/value and path validation as constructio
 JSON numerical equality. Serde can normalize a number's spelling, such as a large integer into equivalent scientific
 notation; round trips preserve its numerical meaning rather than its original text.
 
-There are two explicit conversions:
+`as_json() -> Value` is available for visual inspection, debugging, and snapshot tests. Its existing preview
+formats are preserved:
+
+| Operation | Preview |
+| --- | --- |
+| Insert / Merge | A nested JSON fragment, with null padding for sparse array paths |
+| Add / Remove / Replace / Test | A one-operation JSON Patch array |
+| Auto | `[replace_patch_array, add_patch_array, insert_fragment]`, in fallback order |
+| MergePatch | A jqesque descriptor: `{"op":"merge-patch","path":"/target","value":...}` |
+
+Auto's entries are alternative candidates. The preview does not choose an operation or predict the result on a
+document. MergePatch preserves the raw patch, including deletion markers, in its descriptor; the descriptor itself
+is not an RFC 7396 patch or a JSON Patch operation.
+
+```rust
+use jqesque::Jqesque;
+use serde_json::json;
+
+let assignment: Jqesque = "settings.theme=dark".parse().unwrap();
+assert_eq!(assignment.as_json(), json!([
+    [{"op":"replace","path":"/settings/theme","value":"dark"}],
+    [{"op":"add","path":"/settings/theme","value":"dark"}],
+    {"settings":{"theme":"dark"}}
+]));
+```
+
+Preview allocation is bounded by the validated path and payload limits. It does not spend an application budget;
+Auto's three payload copies and materialized path can exceed the application array-slot limit.
+
+There are also two explicit conversions:
 
 - `to_document()` materializes Insert or deep Merge as a JSON fragment. This is data, not an RFC merge patch.
   For indexed paths, merging the fragment elsewhere may not reproduce `apply_to`.

@@ -312,6 +312,58 @@ impl Jqesque {
         }
     }
 
+    /// Inspect an assignment as JSON, for example in snapshots or a visual preview.
+    ///
+    /// Insert and Merge return a document fragment. Add, Remove, Replace and Test return
+    /// a one-operation JSON Patch array. Auto returns three candidates, in order:
+    /// `[replace_patch_array, add_patch_array, insert_fragment]`. These are alternatives;
+    /// the target document determines which operation `apply_to` chooses.
+    ///
+    /// MergePatch returns a jqesque descriptor with `op: "merge-patch"`, a JSON Pointer
+    /// `path`, and the unmodified patch `value`. This descriptor is not an RFC patch.
+    ///
+    /// This method preserves the existing preview formats, including Auto's nested arrays.
+    /// It does not apply the assignment or predict the resulting document. Use
+    /// [`Self::to_document`] or [`Self::to_json_patch`] for an explicit conversion, and Serde
+    /// to store and restore an assignment's intent.
+    ///
+    /// Preview allocation is bounded by the validated path and payload limits. It does
+    /// not use the application array budget: Auto includes three copies of the payload
+    /// and one materialized path, so its preview can exceed that budget.
+    pub fn as_json(&self) -> Value {
+        match self.operation() {
+            Operation::Insert | Operation::Merge => self.document_preview(),
+            Operation::Auto => Value::Array(vec![
+                Value::Array(vec![self.operation_preview(Operation::Replace)]),
+                Value::Array(vec![self.operation_preview(Operation::Add)]),
+                self.document_preview(),
+            ]),
+            Operation::MergePatch => self.operation_preview(Operation::MergePatch),
+            operation => Value::Array(vec![self.operation_preview(operation)]),
+        }
+    }
+
+    fn document_preview(&self) -> Value {
+        let mut document = Value::Null;
+        // Path bounds cumulative sparse allocation; ValidatedValue bounds the payload.
+        // Previewing does not spend an application budget or depend on a target document.
+        apply_at_path(
+            &mut document,
+            &self.path,
+            self.value().unwrap_or(&Value::Null),
+            Operation::Insert,
+        );
+        document
+    }
+
+    fn operation_preview(&self, operation: Operation) -> Value {
+        let mut preview = json!({"op": operation.name(), "path": self.path.to_json_pointer()});
+        if let Some(value) = self.value() {
+            preview["value"] = value.clone();
+        }
+        preview
+    }
+
     /// Materialize an Insert or deep Merge assignment as a document fragment.
     /// This fragment is data, not an RFC 7396 patch. Applying it with an unrelated merge
     /// implementation need not reproduce `apply_to`, particularly for indexed paths.
@@ -335,11 +387,7 @@ impl Jqesque {
         ) {
             return Err(JqesqueError::UnsupportedConversion(operation));
         }
-        let mut patch = json!({"op": operation.name(), "path": self.path.to_json_pointer()});
-        if let Some(value) = self.value() {
-            patch["value"] = value.clone();
-        }
-        Ok(json!([patch]))
+        Ok(Value::Array(vec![self.operation_preview(operation)]))
     }
 
     /// Apply one assignment. Errors leave the document unchanged.

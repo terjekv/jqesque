@@ -13,15 +13,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Reusable validated `Path`, bounded ordered `Batch`, atomic batch application, and `ApplyOptions`.
 - Structured syntax locations and path-error kinds, with assignment indices for batch failures.
 - Separate `to_document()` and `to_json_patch()` conversions with errors for unsupported operations.
+- Documented `as_json()` previews for visual and snapshot testing, preserving the existing signature and output
+  shapes. MergePatch previews expose an explicit operation/path/value descriptor.
 - Optional `arbitrary-precision` feature and numerical Test equality across integer and decimal representations.
 - Detailed Auto, merge, operation-edge-case, architecture, and migration documentation; README examples are doctests.
 - Auto benchmarks for all three fallback outcomes, library MSRV checks, Markdown CI, and scheduled bounded fuzzing.
 
 ### Changed
 
-- **Breaking:** Replace `as_json()` with `to_document()?` for Insert/Merge or `to_json_patch()?` for JSON Patch
-operations.
-  Auto requires a target to choose its operation; use Serde to store an assignment's intent.
 - **Breaking:** Assignment equality compares numbers numerically, so `1` and `1.0` are equivalent. Do not use assignment
   equality to detect changes in numeric spelling; Serde may normalize equivalent numeric representations.
 - **Breaking:** `value()` now returns `Option<&Value>` and `operation()` returns the Copy enum `Operation` by value.
